@@ -3,4 +3,4 @@
  */
 export { logger } from './logger';
 export { buildAnalytics } from './analytics';
-export { HttpError, UpstreamUnavailableError, PoolExhaustedError } from './http-error';
+export { HttpError, UpstreamUnavailableError } from './http-error';

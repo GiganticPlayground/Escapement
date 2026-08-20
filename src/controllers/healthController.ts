@@ -1,4 +1,4 @@
-import type { NextFunction, Request, Response } from 'express';
+import type { Request, Response } from 'express';
 
 import { engine } from '../services/index';
 
@@ -11,20 +11,12 @@ import { engine } from '../services/index';
  *
  * @route GET /health
  */
-export const getHealth = async (
-  _req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> => {
-  try {
-    const serving = engine.role !== 'starting' && !engine.draining;
-    res.status(serving ? 200 : 503).json({
-      status: engine.draining ? 'draining' : engine.role === 'starting' ? 'starting' : 'ok',
-      service: 'escapement',
-      role: engine.role,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    next(error);
-  }
+export const getHealth = async (_req: Request, res: Response): Promise<void> => {
+  const serving = engine.role !== 'starting' && !engine.draining;
+  res.status(serving ? 200 : 503).json({
+    status: engine.draining ? 'draining' : engine.role === 'starting' ? 'starting' : 'ok',
+    service: 'escapement',
+    role: engine.role,
+    timestamp: new Date().toISOString(),
+  });
 };

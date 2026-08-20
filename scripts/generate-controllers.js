@@ -2,15 +2,12 @@
 
 import fs from 'fs';
 import path from 'path';
-import yaml from 'js-yaml';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import YAML from 'yaml';
 
 // Read the YAML file
 const yamlContent = fs.readFileSync('./api/openapi.yaml', 'utf8');
-const apiSpec = yaml.load(yamlContent);
+const apiSpec = YAML.parse(yamlContent);
 
 // Base directory for controllers
 const controllersDir = './src/controllers';
@@ -45,17 +42,6 @@ Object.entries(apiSpec.paths).forEach(([pathUrl, methods]) => {
   });
 });
 
-// Helper function to generate TypeScript type annotations
-function generateTypeAnnotations(operationId) {
-  return {
-    operation: `operations['${operationId}']`,
-    pathParams: `operations['${operationId}']['parameters']['path']`,
-    queryParams: `operations['${operationId}']['parameters']['query']`,
-    requestBody: `operations['${operationId}']['requestBody']['content']['application/json']`,
-    responseBody: `operations['${operationId}']['responses'][200]['content']['application/json']`,
-  };
-}
-
 // Generate controller files
 controllers.forEach((operations, controllerName) => {
   const fileName = `${controllerName}.ts`;
@@ -67,39 +53,20 @@ controllers.forEach((operations, controllerName) => {
     return;
   }
 
-  // Generate controller content
+  // Generate controller content. No try/catch: Express 5 forwards a rejected
+  // async handler to the error middleware itself. Every operation in this API
+  // answers 200 — mutations are POSTs that return the committed result, and
+  // DELETE is forbidden by design (see CLAUDE.md).
   let content = `/**
  * ${controllerName}
  * Auto-generated from OpenAPI specification
  */
-
-import type { NextFunction } from 'express';
 
 import type { ApiRequest, ApiResponse } from '../types/api-helpers';
 
 `;
 
   operations.forEach((op) => {
-    const types = generateTypeAnnotations(op.operationId);
-
-    // Determine default response status code based on HTTP method
-    let defaultStatusCode = 200;
-    if (op.method === 'POST') defaultStatusCode = 201;
-    if (op.method === 'DELETE') defaultStatusCode = 204;
-
-    // Format the response type - include status code if not 200
-    const responseType =
-      defaultStatusCode === 200
-        ? `ApiResponse<'${op.operationId}'>`
-        : `ApiResponse<'${op.operationId}', ${defaultStatusCode}>`;
-
-    // Generate response code based on status
-    const responseCode =
-      defaultStatusCode === 204
-        ? `res.status(${defaultStatusCode}).end();`
-        : `// TODO: Return properly typed response matching the schema
-    throw new Error('${op.operationId} not implemented');`;
-
     content += `/**
  * ${op.summary}
  * ${op.description}
@@ -107,20 +74,16 @@ import type { ApiRequest, ApiResponse } from '../types/api-helpers';
  */
 export const ${op.operationId} = async (
   req: ApiRequest<'${op.operationId}'>,
-  res: ${responseType},
-  next: NextFunction
+  res: ApiResponse<'${op.operationId}'>,
 ): Promise<void> => {
-  try {
-    // TODO: Implement business logic
-    // Type information:
-    // - req.params: Typed path parameters
-    // - req.query: Typed query parameters
-    // - req.body: Typed request body
+  // TODO: Implement business logic
+  // Type information:
+  // - req.params: Typed path parameters
+  // - req.query: Typed query parameters
+  // - req.body: Typed request body
 
-    ${responseCode}
-  } catch (error) {
-    next(error);
-  }
+  // TODO: Return properly typed response matching the schema
+  throw new Error('${op.operationId} not implemented');
 };
 
 `;

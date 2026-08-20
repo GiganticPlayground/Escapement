@@ -5,6 +5,11 @@
  * These utilities extract types from the auto-generated OpenAPI schema
  * and provide developer-friendly type aliases for Express request handlers.
  *
+ * Nothing in `src/` imports this module today — the hand-written controllers use
+ * plain `Request`/`Response`. It exists for `scripts/generate-controllers.js`,
+ * whose scaffolded controllers are typed against it; keep it in sync with that
+ * template rather than deleting it.
+ *
  * @example
  * ```typescript
  * // Instead of complex nested types:
@@ -158,38 +163,3 @@ export type ApiRequest<T extends keyof operations> = Request<
 export type ApiResponse<T extends keyof operations, Status extends number = 200> = Response<
   ResponseBody<T, Status>
 >;
-
-// ============================================
-// OPERATION TYPE BUNDLE (ADVANCED USAGE)
-// ============================================
-
-/**
- * Complete type information bundle for an operation
- *
- * Useful when you need to extract multiple types from the same operation
- * or when building utilities that work with operation metadata.
- *
- * @example
- * ```typescript
- * type GetUsersOp = Operation<'getUsers'>;
- * // {
- * //   pathParams: Record<string, never>;
- * //   queryParams: { limit?: number; page?: number };
- * //   requestBody: undefined;
- * //   response200: { data?: User[]; total?: number; page?: number; limit?: number };
- * //   response201: void;
- * //   response400: void;
- * //   response404: void;
- * // }
- * ```
- */
-export type Operation<T extends keyof operations> = {
-  pathParams: PathParams<T>;
-  queryParams: QueryParams<T>;
-  requestBody: RequestBody<T>;
-  response200: ResponseBody<T, 200>;
-  response201: ResponseBody<T, 201>;
-  response400: ResponseBody<T, 400>;
-  response404: ResponseBody<T, 404>;
-  response500: ResponseBody<T, 500>;
-};

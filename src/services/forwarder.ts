@@ -52,7 +52,10 @@ export async function forwardToLeader(req: Request, res: Response): Promise<void
       ...(req.method === 'GET' || req.method === 'HEAD'
         ? {}
         : { body: JSON.stringify(req.body ?? {}) }),
-      signal: AbortSignal.timeout(config.SHUTDOWN_TIMEOUT_MS),
+      // Bounded by the failover horizon: if the leader is stuck, a replacement
+      // exists within one lease TTL, so waiting longer than that only pins the
+      // client — and it keeps the 503's `retryAfterMs` advice honest.
+      signal: AbortSignal.timeout(config.LEASE_TTL_MS),
     });
     const text = await upstream.text();
     res.status(upstream.status);

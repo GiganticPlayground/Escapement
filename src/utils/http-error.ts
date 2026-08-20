@@ -21,11 +21,3 @@ export class UpstreamUnavailableError extends HttpError {
     this.name = 'UPSTREAM_UNAVAILABLE';
   }
 }
-
-/** A pool has no unclaimed codes left. */
-export class PoolExhaustedError extends HttpError {
-  constructor(pool: string) {
-    super(409, `Pool '${pool}' has no unclaimed codes left`);
-    this.name = 'POOL_EXHAUSTED';
-  }
-}

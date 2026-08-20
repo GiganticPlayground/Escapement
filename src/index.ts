@@ -31,8 +31,9 @@ const corsOptions =
 
 app.use(helmet());
 app.use(cors(corsOptions));
+// JSON only — the spec declares no other request content type, so a urlencoded
+// parser would be attack surface for a body the validator rejects anyway.
 app.use(express.json({ limit: config.ESCAPEMENT_MAX_BODY_BYTES }));
-app.use(express.urlencoded({ extended: true }));
 app.use(requestContextMiddleware);
 
 // Request/response analytics — opt-in, enabled only when a reqcast config is present.

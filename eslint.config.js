@@ -6,15 +6,6 @@ import nodePlugin from 'eslint-plugin-n';
 import prettierConfig from 'eslint-config-prettier';
 
 export default [
-  {
-    // The failover suite is plain Node ESM, not TypeScript.
-    files: ['tests/integration/**/*.mjs'],
-    languageOptions: {
-      ecmaVersion: 2023,
-      sourceType: 'module',
-      globals: { console: 'readonly', process: 'readonly', fetch: 'readonly', setTimeout: 'readonly', TextEncoder: 'readonly', URL: 'readonly', Buffer: 'readonly' },
-    },
-  },
   // Global ignores
   {
     ignores: [
@@ -135,12 +126,13 @@ export default [
     },
   },
 
-  // Plain ESM scripts (the verification suite's token minter). These are tooling,
-  // not application code: they run under plain node with no TypeScript pass, so
-  // the platform globals the .ts block gets from the compiler have to be declared
-  // here, and writing to stdout is the point rather than a lapse in logging.
+  // Plain ESM tooling: the failover suite, the stub S3, and the build/scaffold
+  // scripts. Not application code — they run under plain node with no TypeScript
+  // pass, so the platform globals the .ts block gets from the compiler have to be
+  // declared here, and writing to stdout is the point rather than a lapse in
+  // logging. (`npm run lint` runs `eslint .`, so these ARE linted.)
   {
-    files: ['**/*.mjs'],
+    files: ['**/*.mjs', 'scripts/**/*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
@@ -148,6 +140,8 @@ export default [
         console: 'readonly',
         process: 'readonly',
         fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
         TextEncoder: 'readonly',
         Buffer: 'readonly',
         URL: 'readonly',
