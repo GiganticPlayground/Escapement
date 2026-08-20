@@ -36,6 +36,22 @@ export function requireAdmin(req: Request): void {
   }
 }
 
+/**
+ * The idempotency key as the engine stores it: scoped to the authenticated
+ * caller and the target machine, never the raw client header alone. A raw key
+ * is a single global namespace — one caller reusing (or guessing) another's key
+ * would be handed the other caller's stored result, and a key first used on a
+ * pool claim would answer a quota consume. Scoping makes a key collide only
+ * with the same caller retrying the same kind of operation, which is the one
+ * collision idempotency exists to serve. A follower forwards the raw header and
+ * the leader re-derives the same scope from the forwarded credential.
+ */
+function scopedKey(req: Request, machine: string, clientKey: string): string {
+  const app = req.auth?.app ?? '-';
+  const user = req.auth?.userId ?? 'anonymous';
+  return `${app}:${user}:${machine}:${clientKey}`;
+}
+
 export async function dispatch(
   req: Request,
   res: Response,
@@ -51,6 +67,9 @@ export async function dispatch(
     return;
   }
 
-  const result = await engine.submit(command);
+  const result = await engine.submit({
+    ...command,
+    key: scopedKey(req, command.machine, command.key),
+  });
   res.status(200).json(result);
 }

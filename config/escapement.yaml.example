@@ -27,16 +27,17 @@ auth:
   - type: jwks
     issuer: ${env:JWT_ISSUER}
     jwks_url: ${env:JWKS_URI}
-    # audience: escapement
+    # Strongly recommended: without an audience, any token this issuer minted
+    # for another service verifies here too. Omitting it logs a warning.
+    audience: escapement
     paths:
       whitelistClaim: whitelist
       blacklistClaim: blacklist
 
   # ---------------------------------------------------------------------------
   # An internal service that mints its own HS256 tokens. `admin: true` lets it
-  # reach /v1/escapement/admin/{app}/{userId}/state, where the target player comes
-  # from the URL rather than the token — so this credential can read and write
-  # ANY player's state. Grant it deliberately.
+  # reach the /v1/escapement/admin/... routes — seeding and releasing pool codes
+  # and defining quotas — plus the engine status endpoint. Grant it deliberately.
   #
   # `requirements` are claim checks applied after verification: this one only
   # accepts tokens whose `scope` claim includes `escapement:admin`.

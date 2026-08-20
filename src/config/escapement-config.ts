@@ -35,7 +35,9 @@ export const PLAYER_ROUTE_PREFIX = '/v1/escapement/me';
 /** Paths that take the target player from the URL rather than the token. */
 export const ADMIN_ROUTE_PREFIX = '/v1/escapement/admin';
 
-const DEFAULT_CONFIG_PATH = 'config/escapement.yaml';
+/** Default config file location; exported so env validation can tell whether a
+ * deployment config supplies auth (making the `JWT_*` vars unnecessary). */
+export const DEFAULT_CONFIG_PATH = 'config/escapement.yaml';
 
 // ---------------------------------------------------------------------------
 // Raw schema (what the file may contain, before placeholder interpolation)
@@ -133,7 +135,8 @@ export interface AuthEnv {
   JWT_AUTH_MODE: 'jwt-jwks' | 'jwt-hs256';
   JWKS_URI?: string | undefined;
   JWT_SECRET?: string | undefined;
-  JWT_ISSUER: string;
+  /** Required only when no config file supplies the strategy list. */
+  JWT_ISSUER?: string | undefined;
   JWT_AUDIENCE?: string | undefined;
   JWT_APP_CLAIM: string;
   JWT_WHITELIST_CLAIM: string;
@@ -343,6 +346,11 @@ function compileStrategies(
  * into explicitly, which means writing a config file.
  */
 function strategyFromEnv(env: AuthEnv): RawAuth {
+  // The env schema requires this when no config file is present; the throw keeps
+  // the type honest for any other caller.
+  if (!env.JWT_ISSUER) {
+    throw new Error('JWT_ISSUER is required when no auth config file is present');
+  }
   const paths = {
     whitelistClaim: env.JWT_WHITELIST_CLAIM,
     blacklistClaim: env.JWT_BLACKLIST_CLAIM,

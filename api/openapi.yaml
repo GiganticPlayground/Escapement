@@ -63,12 +63,14 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HealthCheck' }
 
-  /v1/escapement/engine:
+  /v1/escapement/admin/engine:
     get:
-      summary: Engine status
+      summary: Engine status (admin)
       description: >-
         Current role, committed sequence number, the leader's address, and the
-        registered state machines. Served from memory on any node.
+        registered state machines. Served from memory on any node. Lives under
+        /admin because it maps internal cluster topology — only an admin
+        credential may read it.
       tags: [Engine]
       operationId: getEngineStatus
       x-eov-operation-id: getEngineStatus
@@ -81,6 +83,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/EngineStatus' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /v1/escapement/pools/{pool}:
     get:
@@ -456,6 +459,7 @@ components:
 
     SeedRequest:
       type: object
+      additionalProperties: false
       required: [codes]
       properties:
         codes:
@@ -476,6 +480,7 @@ components:
 
     ClaimRequest:
       type: object
+      additionalProperties: false
       properties:
         by:
           type: string
@@ -485,8 +490,15 @@ components:
             right answer for player-facing calls.
         metadata:
           type: object
-          additionalProperties: true
-          description: Opaque data stored with the claim.
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            maxLength: 1024
+          description: >-
+            Opaque data stored with the claim. Bounded on purpose: every claim's
+            metadata lives in engine state and in every snapshot for as long as
+            the claim does, so an unbounded object here is unbounded memory and
+            snapshot growth. Flat string values only.
 
     Claim:
       type: object
@@ -502,6 +514,7 @@ components:
 
     ReleaseRequest:
       type: object
+      additionalProperties: false
       required: [code]
       properties:
         code: { type: string, minLength: 1, maxLength: 256 }
@@ -526,6 +539,7 @@ components:
 
     DefineQuotaRequest:
       type: object
+      additionalProperties: false
       required: [limit]
       properties:
         limit:
@@ -541,6 +555,7 @@ components:
 
     ConsumeQuotaRequest:
       type: object
+      additionalProperties: false
       properties:
         subject:
           type: string

@@ -45,9 +45,8 @@ function boot(port, label) {
       ESCAPEMENT_CONFIG_PATH: 'tests/fixtures/auth.integration.yaml',
       TEST_PLAYER_SECRET: PLAYER_SECRET,
       TEST_ADMIN_TOKEN: ADMIN_TOKEN,
-      JWT_AUTH_MODE: 'jwt-hs256',
-      JWT_SECRET: PLAYER_SECRET,
-      JWT_ISSUER: 'https://players.test',
+      // No JWT_* vars: the config file above supplies the whole strategy list,
+      // and the env schema no longer demands the unused fallback group.
       PORT: String(port),
       API_DOCS_ENABLED: 'false',
       LOG_TYPE: 'hidden',
@@ -96,8 +95,9 @@ const get = (port, path, token) =>
   fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` } });
 
 let readToken;
+// Engine status names internal endpoints and the leader, so it is admin-only.
 const engineStatus = (port) =>
-  get(port, '/v1/escapement/engine', readToken).then((r) => r.json());
+  get(port, '/v1/escapement/admin/engine', ADMIN_TOKEN).then((r) => r.json());
 
 async function waitForRole(port, role, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -143,6 +143,12 @@ const denied = await post(
   'seed-denied-0001',
 );
 check(denied.status === 403 || denied.status === 401, `a player token cannot seed (${denied.status})`);
+
+const statusDenied = await get(A_PORT, '/v1/escapement/admin/engine', player);
+check(
+  statusDenied.status === 403,
+  `a player token cannot read cluster topology (${statusDenied.status})`,
+);
 
 const seeded = await post(
   A_PORT,

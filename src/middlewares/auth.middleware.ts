@@ -29,6 +29,18 @@ import { HttpError, logger } from '../utils/index';
  */
 const strategies = loadAuthStrategies(config);
 
+// Without an audience, verification checks only signature and issuer — a token
+// the same issuer minted for a DIFFERENT service passes here too. Legal, but
+// worth a loud note per strategy so the omission is a decision, not a default.
+for (const strategy of strategies) {
+  if (strategy.issuer !== undefined && !(strategy.options as { audience?: string }).audience) {
+    logger.warn(
+      `auth strategy "${strategy.label}" verifies no audience — ` +
+        `tokens minted by this issuer for other services will be accepted`,
+    );
+  }
+}
+
 /** Strategies indexed by the issuer of the tokens they verify (JWT strategies only). */
 const byIssuer = new Map<string, CompiledAuthStrategy>(
   strategies

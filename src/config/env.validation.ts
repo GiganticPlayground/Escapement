@@ -1,4 +1,8 @@
+import { existsSync } from 'fs';
+
 import { z } from 'zod';
+
+import { DEFAULT_CONFIG_PATH } from './escapement-config';
 
 /** Characters accepted in a key path segment, kept deliberately narrower than S3's. */
 const KEY_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
@@ -169,10 +173,13 @@ export const envSchema = z
     ESCAPEMENT_MAX_BODY_BYTES: z.string().optional().default('16mb'),
 
     // --- JWT verification (tokens issued elsewhere, e.g. Token Weaver) ----
+    // The whole JWT_* group is the no-config-file fallback: when a deployment
+    // config file supplies the strategy list, none of it is read, so none of it
+    // is required — see the superRefine below.
     JWT_AUTH_MODE: z.enum(['jwt-jwks', 'jwt-hs256']).optional().default('jwt-jwks'),
     JWKS_URI: z.url().optional(),
     JWT_SECRET: z.string().min(1).optional(),
-    JWT_ISSUER: z.string().min(1),
+    JWT_ISSUER: z.string().min(1).optional(),
     JWT_AUDIENCE: z.string().min(1).optional(),
     JWT_APP_CLAIM: z.string().min(1).optional().default('app'),
     JWT_WHITELIST_CLAIM: z.string().min(1).optional().default('whitelist'),
@@ -186,19 +193,33 @@ export const envSchema = z
     SHUTDOWN_TIMEOUT_MS: intVar(30_000),
   })
   .superRefine((env, ctx) => {
-    if (env.JWT_AUTH_MODE === 'jwt-jwks' && !env.JWKS_URI) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['JWKS_URI'],
-        message: 'JWKS_URI is required when JWT_AUTH_MODE=jwt-jwks',
-      });
-    }
-    if (env.JWT_AUTH_MODE === 'jwt-hs256' && !env.JWT_SECRET) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['JWT_SECRET'],
-        message: 'JWT_SECRET is required when JWT_AUTH_MODE=jwt-hs256',
-      });
+    // With a config file in play, `loadAuthStrategies` never reads the JWT_*
+    // vars — requiring them anyway is pure deployment friction (the failover
+    // suite used to inject dummy values to get past this).
+    const fileSuppliesAuth =
+      env.ESCAPEMENT_CONFIG_PATH !== undefined || existsSync(DEFAULT_CONFIG_PATH);
+    if (!fileSuppliesAuth) {
+      if (!env.JWT_ISSUER) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JWT_ISSUER'],
+          message: 'JWT_ISSUER is required when no auth config file is present',
+        });
+      }
+      if (env.JWT_AUTH_MODE === 'jwt-jwks' && !env.JWKS_URI) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JWKS_URI'],
+          message: 'JWKS_URI is required when JWT_AUTH_MODE=jwt-jwks',
+        });
+      }
+      if (env.JWT_AUTH_MODE === 'jwt-hs256' && !env.JWT_SECRET) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JWT_SECRET'],
+          message: 'JWT_SECRET is required when JWT_AUTH_MODE=jwt-hs256',
+        });
+      }
     }
     if (env.LEASE_TTL_MS <= env.FOLLOW_POLL_MS * 2) {
       // A follower needs at least a couple of polls inside the TTL window to

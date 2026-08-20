@@ -24,7 +24,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/escapement/engine": {
+    "/v1/escapement/admin/engine": {
         parameters: {
             query?: never;
             header?: never;
@@ -32,8 +32,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Engine status
-         * @description Current role, committed sequence number, the leader's address, and the registered state machines. Served from memory on any node.
+         * Engine status (admin)
+         * @description Current role, committed sequence number, the leader's address, and the registered state machines. Served from memory on any node. Lives under /admin because it maps internal cluster topology — only an admin credential may read it.
          */
         get: operations["getEngineStatus"];
         put?: never;
@@ -245,9 +245,9 @@ export interface components {
         ClaimRequest: {
             /** @description Who the claim is for. Defaults to the token's subject, which is the right answer for player-facing calls. */
             by?: string;
-            /** @description Opaque data stored with the claim. */
+            /** @description Opaque data stored with the claim. Bounded on purpose: every claim's metadata lives in engine state and in every snapshot for as long as the claim does, so an unbounded object here is unbounded memory and snapshot growth. Flat string values only. */
             metadata?: {
-                [key: string]: unknown;
+                [key: string]: string;
             };
         };
         Claim: {
@@ -432,6 +432,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getPool: {

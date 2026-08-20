@@ -5,7 +5,6 @@ import { logger } from '../utils/index';
 interface CustomError extends Error {
   status?: number;
   errors?: unknown;
-  currentEtag?: string;
 }
 
 interface ExpressHandler<T extends Error> {
@@ -14,16 +13,6 @@ interface ExpressHandler<T extends Error> {
 
 export const errorHandlerMiddleware: ExpressHandler<CustomError> = (err, _req, res, _next) => {
   logger.error('Request error', err);
-
-  // State conflict — domain-level payload with the current ETag for the client
-  // to re-fetch, merge, and retry.
-  if (err.status === 409 && typeof err.currentEtag === 'string') {
-    res.setHeader('ETag', err.currentEtag);
-    return res.status(409).json({
-      errorCode: 'STATE_CONFLICT',
-      currentEtag: err.currentEtag,
-    });
-  }
 
   if (err.status === 400 && err.errors) {
     return res.status(400).json({
@@ -47,8 +36,10 @@ export const errorHandlerMiddleware: ExpressHandler<CustomError> = (err, _req, r
     });
   }
 
+  // Anything else is an internal failure. Its message is for the log above, not
+  // the wire: S3 client errors and dependency internals routinely carry paths,
+  // hostnames, and library detail that no caller should see.
   return res.status(500).json({
-    message: err.message || 'Internal server error',
-    ...(err.errors ? { errors: err.errors } : {}),
+    message: 'Internal server error',
   });
 };
