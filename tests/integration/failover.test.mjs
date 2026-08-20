@@ -217,9 +217,10 @@ check(
 );
 check(
   // A follower that has not tailed the seed yet 404s the pool, so `claimed` is
-  // absent — that is maximal lag, not a failure.
+  // absent — that is maximal lag, not a failure. This is a sanity bound, not a
+  // locality proof: the convergence check above is the real assertion here.
   (immediate.claimed ?? 0) <= followerStats.claimed,
-  'follower reads are served locally and lag rather than blocking on the leader',
+  'follower-reported claims only ever grow toward the leader (monotone lag)',
 );
 
 // ---- idempotency keys are scoped per caller and per machine ---------------
@@ -407,9 +408,14 @@ const t1 = Date.now();
 const handedOver = await waitForRole(leaderPort, 'leader', 12_000);
 const gracefulMs = Date.now() - t1;
 check(handedOver !== null, `graceful handover completed in ${gracefulMs}ms`);
+// The threshold must separate the two mechanisms, not just beat the TTL: the
+// lease was last renewed at most TTL/3 before the SIGTERM, so a handover that
+// merely WAITED OUT expiry lands between ~2667ms and ~4400ms. A released lease
+// is picked up on the standby's next 400ms poll — a few hundred ms. 2000ms
+// cleanly separates them; a reverted release fails this check every run.
 check(
-  gracefulMs < 4000,
-  `handover beat the 4000ms lease TTL (${gracefulMs}ms) — the lease was released, not expired`,
+  gracefulMs < 2000,
+  `handover in ${gracefulMs}ms — released-lease speed, not the 2667ms+ of expiry`,
 );
 
 for (const child of [a, b, c]) {

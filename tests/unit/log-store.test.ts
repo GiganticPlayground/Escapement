@@ -120,6 +120,7 @@ describe('LogStore against S3 error codes', () => {
     s3.faults.push({ method: 'PUT', keyIncludes: 'log/', times: 1, status: 503, code: 'SlowDown' });
 
     assert.equal(await store.append(entryAt(1, 'batch-1')), 'committed');
+    assert.equal((await store.readLog(1))?.batchId, 'batch-1', 'and the entry really landed');
   });
 
   it('throws rather than guesses when the outcome stays unknown', async () => {

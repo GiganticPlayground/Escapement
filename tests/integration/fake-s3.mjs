@@ -34,7 +34,10 @@ export function startFakeS3(port) {
           '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
           `<Name>b</Name><KeyCount>${keys.length}</KeyCount><IsTruncated>false</IsTruncated>` +
           keys
-            .map((k) => `<Contents><Key>${esc(k)}</Key><Size>${store.get(k).body.length}</Size></Contents>`)
+            .map(
+              (k) =>
+                `<Contents><Key>${esc(k)}</Key><Size>${store.get(k).body.length}</Size></Contents>`,
+            )
             .join('') +
           '</ListBucketResult>',
       );

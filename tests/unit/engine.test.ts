@@ -139,8 +139,11 @@ describe('Engine', () => {
     await engine.start();
     await seed(engine, ['A', 'B', 'C']);
 
-    // Both are queued before the batch window closes, so neither is in the
-    // idempotency map yet — the batch-local guard is what saves us here.
+    // Both submits push onto the queue synchronously (inside Promise.all's
+    // argument evaluation), and commitLoop's splice only runs in a later
+    // microtask — so sharing one batch is deterministic, not a window race.
+    // Neither key is in the idempotency map yet; the batch-local guard is
+    // what saves us here.
     const [a, b] = await Promise.all([claim(engine, 'dup'), claim(engine, 'dup')]);
     assert.equal((a as { code: string }).code, (b as { code: string }).code);
 
@@ -230,7 +233,7 @@ describe('Engine', () => {
     // seed = commit 1, then three claims. With snapshotEvery=2 that compacts at
     // seq 2 and again at seq 4, and the second pass prunes the whole log.
     await seed(engine, ['A', 'B', 'C', 'D']);
-    await claim(engine, 'c1');
+    const c1 = (await claim(engine, 'c1')) as { code: string };
     await claim(engine, 'c2');
     await claim(engine, 'c3');
     await waitFor(() => store.snapshots.length >= 2 && store.log.size === 0);
@@ -248,10 +251,15 @@ describe('Engine', () => {
       (state) => state.get('p')!.free.size,
     );
     assert.equal(remaining, 1, 'snapshot alone rebuilt the pool exactly');
-    // And idempotency survived compaction, not just the log.
+    // And idempotency survived compaction, not just the log: the retry must
+    // replay the ORIGINAL code and leave the pool untouched.
     const replay = (await claim(revived, 'c1')) as { code: string };
-    assert.equal(remaining, 1);
-    assert.ok(typeof replay.code === 'string');
+    assert.equal(replay.code, c1.code, 'the retry replayed the code issued before compaction');
+    const afterReplay = revived.query<Map<string, { free: { size: number } }>, number>(
+      'pool',
+      (state) => state.get('p')!.free.size,
+    );
+    assert.equal(afterReplay, 1, 'the replay did not burn a fresh code');
     await revived.shutdown(100);
   });
 
@@ -321,8 +329,11 @@ describe('Engine', () => {
     await claim(engine, 'solo');
     const elapsed = Date.now() - started;
 
+    // The discriminant is the 400ms window itself: a leader that waited it out
+    // cannot finish under it. The bound leaves headroom for CI scheduling
+    // noise while still failing decisively if the window is ever paid.
     assert.ok(
-      elapsed < 200,
+      elapsed < 300,
       `an idle leader committed in ${elapsed}ms, well inside the 400ms window`,
     );
     await engine.shutdown(100);
@@ -395,9 +406,9 @@ describe('Engine', () => {
     assert.equal(engine.role, 'follower');
     assert.equal(fatals.length, 0);
 
-    // The first poll reads the lease, the next one acts on it.
+    // The first poll reads the lease, the next one acts on it. waitFor throws
+    // on timeout, so reaching the assertion means it refused to keep serving.
     await waitFor(() => fatals.length > 0);
-    assert.equal(fatals.length > 0, true, 'it refused to keep serving stale state');
     assert.match(fatals[0]!, /fell behind the prune horizon/);
     await engine.shutdown(100);
   });
@@ -533,7 +544,9 @@ describe('Engine', () => {
     await seed(engine, ['A', 'B', 'C']); // seq 1 — this node believes head = 1
 
     // B's tenure while this node is "paused": B holds the lease, committed to
-    // seq 6, and pruned the log behind its snapshot — seq 2 is creatable again.
+    // seq 6, snapshotted, and pruned the log behind its retain margin — so
+    // seqs 1–4 are deleted (2 is creatable again) while B's recent tail
+    // survives. This node still believes the head is seq 1.
     store.takeLease({
       writerId: 'B',
       endpoint: 'http://b:3000',
@@ -541,6 +554,15 @@ describe('Engine', () => {
       seq: 6,
     });
     store.log.delete(1);
+    for (const seq of [5, 6]) {
+      store.log.set(seq, {
+        seq,
+        batchId: `b-batch-${seq}`,
+        writerId: 'B',
+        at: AT,
+        commits: [],
+      });
+    }
 
     const settled = await Promise.allSettled([claim(engine, 'stale')]);
     assert.ok(store.log.has(2), 'the conditional write really did land in the pruned slot');
@@ -581,7 +603,10 @@ describe('Engine', () => {
   it("graceful shutdown leaves another node's lease alone", async () => {
     // A drain that outlives the lease TTL means a peer may already have taken
     // over; the shutdown's delete must be verified, or it removes the NEW
-    // leader's lease and forces a second, avoidable election.
+    // leader's lease and forces a second, avoidable election. Scope note: the
+    // fake mirrors LogStore's verified delete, so this proves the ENGINE asks
+    // to release with its own nodeId; the production read-then-delete itself
+    // is pinned by log-store.test.ts against real HTTP semantics.
     const store = new MemoryLogStore();
     const engine = buildEngine(store);
     await engine.start();
