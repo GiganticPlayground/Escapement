@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" width="1200" height="470" role="img" aria-label="Escapement releases many concurrent claims one batch at a time into an append-only log on S3">
+<title>Escapement</title>
+<desc>Concurrent claims arrive with no ordering. A single writer — drawn as a clock escape wheel and pallet fork — releases exactly one batch at a time, in order, into an append-only log of objects in S3 written with create-only conditional writes.</desc>
+<defs>
+<linearGradient id="brass" x1="0.2" y1="0" x2="0.8" y2="1"><stop offset="0" stop-color="#e8bc63"/><stop offset="0.55" stop-color="#d9a441"/><stop offset="1" stop-color="#a87a2a"/></linearGradient>
+<linearGradient id="lane" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6ee7b7" stop-opacity="0.14"/><stop offset="1" stop-color="#6ee7b7" stop-opacity="0.6"/></linearGradient>
+<marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8ba0b8"/></marker>
+<marker id="arwb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a87a2a"/></marker>
+</defs>
+<rect width="1200" height="470" rx="18" fill="#0d1424"/>
+<text x="58" y="62" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="19" font-weight="600" fill="#e6edf6">Concurrent claims</text>
+<text x="58" y="86" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13.5" fill="#8ba0b8">many callers, arriving in no order</text>
+<path d="M 58 128 L 286 128" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="86" cy="128" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="138" cy="128" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="190" cy="128" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="242" cy="128" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 128 C 344 128 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 168 L 286 168" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="100" cy="168" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="152" cy="168" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="204" cy="168" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="256" cy="168" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 168 C 344 168 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 208 L 286 208" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="86" cy="208" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="138" cy="208" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="190" cy="208" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="242" cy="208" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 208 C 344 208 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 248 L 286 248" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="100" cy="248" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="152" cy="248" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="204" cy="248" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="256" cy="248" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 248 C 344 248 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 288 L 286 288" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="86" cy="288" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="138" cy="288" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="190" cy="288" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="242" cy="288" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 288 C 344 288 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 328 L 286 328" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="100" cy="328" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="152" cy="328" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="204" cy="328" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="256" cy="328" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 328 C 344 328 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 58 368 L 286 368" stroke="url(#lane)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<circle cx="86" cy="368" r="5" fill="#6ee7b7" opacity="0.22"/>
+<circle cx="138" cy="368" r="5" fill="#6ee7b7" opacity="0.40"/>
+<circle cx="190" cy="368" r="5" fill="#6ee7b7" opacity="0.58"/>
+<circle cx="242" cy="368" r="5" fill="#6ee7b7" opacity="0.76"/>
+<path d="M 286 368 C 344 368 352 232 396 232" stroke="#8ba0b8" stroke-width="1.5" fill="none" opacity="0.5"/>
+<path d="M 396 232 L 452 232" stroke="#8ba0b8" stroke-width="2" marker-end="url(#arw)" fill="none"/>
+<circle cx="600" cy="232" r="136" fill="#111a2e" stroke="#1e2b45" stroke-width="1.5"/>
+<path d="M 688.00,232.00 L 702.75,261.85 L 684.19,257.61 L 683.69,259.19 L 688.50,292.14 L 672.16,282.37 L 671.19,283.73 L 665.58,316.55 L 653.06,302.21 L 651.73,303.19 L 636.24,332.67 L 628.77,315.17 L 627.19,315.69 L 603.36,338.95 L 601.66,319.98 L 600.00,320.00 L 570.15,334.75 L 574.39,316.19 L 572.81,315.69 L 539.86,320.50 L 549.63,304.16 L 548.27,303.19 L 515.45,297.58 L 529.79,285.06 L 528.81,283.73 L 499.33,268.24 L 516.83,260.77 L 516.31,259.19 L 493.05,235.36 L 512.02,233.66 L 512.00,232.00 L 497.25,202.15 L 515.81,206.39 L 516.31,204.81 L 511.50,171.86 L 527.84,181.63 L 528.81,180.27 L 534.42,147.45 L 546.94,161.79 L 548.27,160.81 L 563.76,131.33 L 571.23,148.83 L 572.81,148.31 L 596.64,125.05 L 598.34,144.02 L 600.00,144.00 L 629.85,129.25 L 625.61,147.81 L 627.19,148.31 L 660.14,143.50 L 650.37,159.84 L 651.73,160.81 L 684.55,166.42 L 670.21,178.94 L 671.19,180.27 L 700.67,195.76 L 683.17,203.23 L 683.69,204.81 L 706.95,228.64 L 687.98,230.34 Z" fill="url(#brass)" stroke="#a87a2a" stroke-width="1" stroke-linejoin="round"/>
+<circle cx="600" cy="232" r="78" fill="#111a2e" stroke="#a87a2a" stroke-width="2"/>
+<path d="M 600.00,164.00 L 600.00,218.00" stroke="#a87a2a" stroke-width="4" opacity="0.55" stroke-linecap="round"/>
+<path d="M 664.67,210.99 L 613.31,227.67" stroke="#a87a2a" stroke-width="4" opacity="0.55" stroke-linecap="round"/>
+<path d="M 639.97,287.01 L 608.23,243.33" stroke="#a87a2a" stroke-width="4" opacity="0.55" stroke-linecap="round"/>
+<path d="M 560.03,287.01 L 591.77,243.33" stroke="#a87a2a" stroke-width="4" opacity="0.55" stroke-linecap="round"/>
+<path d="M 535.33,210.99 L 586.69,227.67" stroke="#a87a2a" stroke-width="4" opacity="0.55" stroke-linecap="round"/>
+<circle cx="600" cy="232" r="10" fill="#d9a441" stroke="#a87a2a" stroke-width="1.5"/>
+<path d="M 560 286 A 66 66 0 0 0 640 286" stroke="#a87a2a" stroke-width="2" fill="none" marker-end="url(#arwb)" opacity="0.9"/>
+<g stroke-linejoin="round" stroke-linecap="round">
+<path d="M 600 84 L 505.6 177.5" stroke="#9fb3c8" stroke-width="14" fill="none"/>
+<path d="M 600 84 L 694.4 177.5" stroke="#9fb3c8" stroke-width="14" fill="none"/>
+<path d="M 505.6 177.5 L 694.4 177.5" stroke="#6f8296" stroke-width="4" fill="none" opacity="0.45"/>
+</g>
+<circle cx="505.6" cy="177.5" r="10" fill="#111a2e" stroke="#9fb3c8" stroke-width="4"/>
+<circle cx="694.4" cy="177.5" r="10" fill="#111a2e" stroke="#9fb3c8" stroke-width="4"/>
+<circle cx="600" cy="84" r="12" fill="#111a2e" stroke="#9fb3c8" stroke-width="4"/>
+<circle cx="694.4" cy="177.5" r="21" fill="none" stroke="#f0a868" stroke-width="2.2"/>
+<path d="M 716 162 L 800 130" stroke="#f0a868" stroke-width="1.4" fill="none" opacity="0.75"/>
+<text x="796" y="126" text-anchor="end" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13.5" fill="#f0a868">exactly one batch</text>
+<text x="600" y="408" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="20" font-weight="600" fill="#e6edf6">One writer</text>
+<text x="600" y="432" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13.5" fill="#8ba0b8">decides in memory · never two at once</text>
+<path d="M 744 232 L 800 232" stroke="#8ba0b8" stroke-width="2" marker-end="url(#arw)" fill="none"/>
+<text x="836" y="62" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="19" font-weight="600" fill="#e6edf6">Append-only log</text>
+<text x="836" y="86" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13.5" fill="#8ba0b8">S3 — one object per batch</text>
+<rect x="836" y="120" width="304" height="64" rx="11" fill="#111a2e" stroke="#1e2b45" stroke-width="1.5"/>
+<text x="856" y="148" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" font-weight="600" fill="#e6edf6">log/000000041.json</text>
+<text x="856" y="169" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#6ee7b7">committed</text>
+<path d="M 1104 147 l 7 8 l 14 -17" stroke="#6ee7b7" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="836" y="198" width="304" height="64" rx="11" fill="#111a2e" stroke="#1e2b45" stroke-width="1.5"/>
+<text x="856" y="226" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" font-weight="600" fill="#e6edf6">log/000000042.json</text>
+<text x="856" y="247" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#6ee7b7">committed</text>
+<path d="M 1104 225 l 7 8 l 14 -17" stroke="#6ee7b7" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="836" y="276" width="304" height="64" rx="11" fill="#111a2e" stroke="#f0a868" stroke-width="2.2"/>
+<text x="856" y="304" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" font-weight="600" fill="#e6edf6">log/000000043.json</text>
+<text x="856" y="325" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#f0a868">If-None-Match: *</text>
+<text x="836" y="372" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#8ba0b8">A create-only write is three things at once:</text>
+<circle cx="843" cy="388" r="2.6" fill="#6ee7b7"/>
+<text x="856" y="392" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#8ba0b8">the durability point</text>
+<circle cx="843" cy="410" r="2.6" fill="#6ee7b7"/>
+<text x="856" y="414" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#8ba0b8">the fence against a second writer</text>
+<circle cx="843" cy="432" r="2.6" fill="#6ee7b7"/>
+<text x="856" y="436" font-family="ui-sans-serif,-apple-system,Segoe UI,Inter,Helvetica,Arial,sans-serif" font-size="13" fill="#8ba0b8">the ordering</text>
+</svg>

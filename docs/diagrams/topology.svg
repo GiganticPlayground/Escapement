@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" role="img"
+     aria-label="Every node accepts every request; the follower forwards mutations to the leader and tails the log from S3, while the leader is the only writer.">
+  <style>
+    svg { color: #4a5568; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) { svg { color: #b3bcc9; } }
+    .box { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .lead { stroke-width: 2.5; }
+    .fill { fill: currentColor; opacity: 0.06; stroke: none; }
+    .t { fill: currentColor; font-size: 13px; }
+    .h { fill: currentColor; font-size: 14px; font-weight: 600; }
+    .s { fill: currentColor; font-size: 11.5px; opacity: 0.78; }
+    .l { fill: currentColor; font-size: 11.5px; }
+    .line { stroke: currentColor; stroke-width: 1.5; fill: none; }
+    .dash { stroke-dasharray: 5 4; }
+  </style>
+  <defs>
+    <marker id="ar-topo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <rect class="fill" x="24" y="170" width="120" height="60" rx="6"/>
+  <rect class="box" x="24" y="170" width="120" height="60" rx="6"/>
+  <text class="h" x="84" y="197" text-anchor="middle">Clients</text>
+  <text class="s" x="84" y="215" text-anchor="middle">JWT bearer</text>
+
+  <rect class="fill" x="192" y="170" width="130" height="60" rx="6"/>
+  <rect class="box" x="192" y="170" width="130" height="60" rx="6"/>
+  <text class="h" x="257" y="192" text-anchor="middle">Load balancer</text>
+  <text class="s" x="257" y="210" text-anchor="middle">no leader awareness;</text>
+  <text class="s" x="257" y="224" text-anchor="middle">both tasks report healthy</text>
+
+  <rect class="fill" x="396" y="52" width="228" height="106" rx="6"/>
+  <rect class="box lead" x="396" y="52" width="228" height="106" rx="6"/>
+  <text class="h" x="412" y="76">Node A — leader</text>
+  <text class="s" x="412" y="98">holds lease.json</text>
+  <text class="s" x="412" y="116">runs the commit loop</text>
+  <text class="s" x="412" y="134">authoritative state in RAM</text>
+
+  <rect class="fill" x="396" y="244" width="228" height="106" rx="6"/>
+  <rect class="box" x="396" y="244" width="228" height="106" rx="6"/>
+  <text class="h" x="412" y="268">Node B — follower</text>
+  <text class="s" x="412" y="290">tails the log to stay warm</text>
+  <text class="s" x="412" y="308">serves reads from own RAM</text>
+  <text class="s" x="412" y="326">forwards every mutation</text>
+
+  <rect class="fill" x="700" y="128" width="176" height="146" rx="6"/>
+  <rect class="box" x="700" y="128" width="176" height="146" rx="6"/>
+  <text class="h" x="788" y="152" text-anchor="middle">S3 bucket</text>
+  <text class="s" x="788" y="177" text-anchor="middle">log/&lt;seq&gt;.json</text>
+  <text class="s" x="788" y="197" text-anchor="middle">snapshot/&lt;seq&gt;.json</text>
+  <text class="s" x="788" y="217" text-anchor="middle">lease.json</text>
+  <text class="s" x="788" y="247" text-anchor="middle">the only source of truth</text>
+
+  <line class="line" x1="144" y1="200" x2="186" y2="200" marker-end="url(#ar-topo)"/>
+  <path class="line" d="M 322 188 L 396 128" marker-end="url(#ar-topo)"/>
+  <path class="line" d="M 322 212 L 396 272" marker-end="url(#ar-topo)"/>
+  <text class="l" x="336" y="196">any request,</text>
+  <text class="l" x="336" y="212">either node</text>
+
+  <path class="line" d="M 510 244 L 510 164" marker-end="url(#ar-topo)"/>
+  <text class="l" x="522" y="196">forwards mutations</text>
+  <text class="l" x="522" y="212">(one extra hop, ~1 ms)</text>
+
+  <path class="line" d="M 624 96 L 700 158" marker-end="url(#ar-topo)"/>
+  <text class="l" x="628" y="66">PUT log/&lt;seq&gt;.json</text>
+  <text class="l" x="628" y="82">If-None-Match: *</text>
+
+  <path class="line dash" d="M 700 246 L 624 300" marker-end="url(#ar-topo)"/>
+  <text class="l" x="626" y="330">GET log/&lt;seq+1&gt;</text>
+  <text class="l" x="626" y="346">GET lease.json</text>
+  <text class="l" x="626" y="362">every FOLLOW_POLL_MS</text>
+</svg>

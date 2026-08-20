@@ -1,0 +1,616 @@
+openapi: 3.1.1
+info:
+  title: Escapement API
+  description: >-
+    Single-writer state machines over object storage. Escapement serializes every
+    mutation through one writer, commits batches to S3 as an append-only log with
+    conditional writes, and serves reads from memory. Each state machine —
+    `pool`, `quota`, and whatever you add — shares that engine.
+
+
+    **Every mutation is a POST.** `PUT`, `PATCH` and `DELETE` are deliberately
+    unused: CDN and WAF layers in front of a service frequently reject them by
+    default, and getting them opened is an infrastructure conversation rather
+    than a code change.
+  version: 0.1.0
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local server
+
+tags:
+  - name: Pool
+    description: >-
+      Claim-once allocation from a finite set of codes. Every code is issued at
+      most once, and the pool can run out.
+  - name: Quota
+    description: >-
+      Counters with an enforced ceiling, either in total or per subject. Consuming
+      past the ceiling is refused rather than clamped.
+  - name: Engine
+    description: Leader/follower role, commit sequence, and registered machines.
+  - name: Admin
+    description: >-
+      Operations restricted to credentials marked `admin` in the auth config.
+      They live under `/v1/escapement/admin` so the auth middleware can gate the
+      whole family by prefix, and each one re-checks the privilege next to the
+      code that acts on it.
+  - name: System
+    description: Service health.
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: >-
+        Reports `ok` once the node has taken a role (leader or follower).
+        Followers report healthy on purpose — see the README's deployment notes.
+      tags: [System]
+      operationId: getHealth
+      x-eov-operation-id: getHealth
+      x-eov-operation-handler: healthController
+      responses:
+        '200':
+          description: Node is serving
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthCheck' }
+        '503':
+          description: Node has not finished starting, or is draining
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthCheck' }
+
+  /v1/escapement/engine:
+    get:
+      summary: Engine status
+      description: >-
+        Current role, committed sequence number, the leader's address, and the
+        registered state machines. Served from memory on any node.
+      tags: [Engine]
+      operationId: getEngineStatus
+      x-eov-operation-id: getEngineStatus
+      x-eov-operation-handler: engineController
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Engine status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EngineStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/escapement/pools/{pool}:
+    get:
+      summary: Pool statistics
+      description: Remaining, claimed and total counts. Read from memory; no S3 call.
+      tags: [Pool]
+      operationId: getPool
+      x-eov-operation-id: getPool
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+      responses:
+        '200':
+          description: Pool statistics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PoolStats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/escapement/admin/pools/{pool}/seed:
+    post:
+      summary: Seed a pool with codes
+      description: >-
+        Adds codes to a pool, creating it if absent. Codes already present are
+        ignored, so a retry with an overlapping set is safe. Admin credentials
+        only. The whole set lands in a single log entry — seeding 100k codes
+        writes one multi-megabyte object, which is fine but worth knowing.
+      tags: [Pool, Admin]
+      operationId: seedPool
+      x-eov-operation-id: seedPool
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SeedRequest' }
+      responses:
+        '200':
+          description: Pool seeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeedResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/escapement/pools/{pool}/claims:
+    post:
+      summary: Claim the next available code
+      description: >-
+        Pops one code from the pool and records the claim durably before
+        responding. Retrying with the same `Idempotency-Key` returns the same
+        code rather than consuming another.
+      tags: [Pool]
+      operationId: claimNext
+      x-eov-operation-id: claimNext
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimRequest' }
+      responses:
+        '200':
+          description: Code claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Claim' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The pool has no unclaimed codes left
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/escapement/pools/{pool}/claims/{code}:
+    get:
+      summary: Look up a claim
+      description: Who holds a given code, and when they took it. Served from memory.
+      tags: [Pool]
+      operationId: getClaim
+      x-eov-operation-id: getClaim
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '200':
+          description: The claim
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Claim' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Claim a specific code
+      description: >-
+        Redemption of a code the caller already holds. Returns `409` if someone
+        else took it first, `404` if the code is not in this pool.
+      tags: [Pool]
+      operationId: claimCode
+      x-eov-operation-id: claimCode
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+        - $ref: '#/components/parameters/Code'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimRequest' }
+      responses:
+        '200':
+          description: Code claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Claim' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Code is already claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/escapement/admin/pools/{pool}/releases:
+    post:
+      summary: Return a claimed code to the pool
+      description: >-
+        Undoes a claim so the code can be issued again — for a downstream step
+        that failed after the claim succeeded. Admin credentials only, because a
+        careless release re-issues a code someone may already be holding.
+      tags: [Pool, Admin]
+      operationId: releaseCode
+      x-eov-operation-id: releaseCode
+      x-eov-operation-handler: poolController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PoolName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReleaseRequest' }
+      responses:
+        '200':
+          description: Code returned to the pool
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleaseResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/escapement/quotas/{quota}:
+    get:
+      summary: Quota definition and usage
+      description: >-
+        Served from memory on whichever node answers, so a follower replies as
+        readily as the leader and its figures may trail the leader by up to one
+        poll interval. A per-subject quota reports one subject's usage: name it
+        with `?subject=`, or omit it and the caller's own identity is used. A
+        credential that carries no identity must pass one, or the request is
+        rejected with `400`.
+      tags: [Quota]
+      operationId: getQuota
+      x-eov-operation-id: getQuota
+      x-eov-operation-handler: quotaController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/QuotaName'
+        - name: subject
+          in: query
+          required: false
+          description: >-
+            Whose usage to report. Required for a per-subject quota unless the
+            credential names a subject; ignored for a whole-quota ceiling.
+          schema: { type: string, maxLength: 256 }
+      responses:
+        '200':
+          description: Quota state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuotaState' }
+        '400':
+          description: Per-subject quota asked about without a subject
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/escapement/admin/quotas/{quota}:
+    post:
+      summary: Define or redefine a quota
+      description: >-
+        Sets the ceiling. Redefining preserves recorded usage, so lowering a
+        limit below current usage is allowed and simply leaves it exhausted.
+        Admin credentials only.
+      tags: [Quota, Admin]
+      operationId: defineQuota
+      x-eov-operation-id: defineQuota
+      x-eov-operation-handler: quotaController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/QuotaName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DefineQuotaRequest' }
+      responses:
+        '200':
+          description: Quota defined
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuotaDefinition' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/escapement/quotas/{quota}/consume:
+    post:
+      summary: Consume quota
+      description: >-
+        Increments usage if the ceiling allows it, atomically. Returns `429` when
+        the increment would exceed the limit — nothing is consumed in that case.
+      tags: [Quota]
+      operationId: consumeQuota
+      x-eov-operation-id: consumeQuota
+      x-eov-operation-handler: quotaController
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/QuotaName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsumeQuotaRequest' }
+      responses:
+        '200':
+          description: Quota consumed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsumeResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: Consuming this amount would exceed the quota
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsumeRejected' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Verified by `token-weaver`. Escapement never issues tokens. Strategies
+        (`jwks`, `hs256`, `static`) come from the deployment config file.
+
+  parameters:
+    PoolName:
+      name: pool
+      in: path
+      required: true
+      description: Pool identifier. Pools are independent allocation sets.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,128}$'
+    QuotaName:
+      name: quota
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,128}$'
+    Code:
+      name: code
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Caller-generated key that makes the mutation replayable. A retry with
+        the same key returns the original result instead of performing the
+        mutation twice. Required on every mutating operation — a claim API that
+        burns a code on a network retry is broken in a way users notice.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 200
+
+  responses:
+    Unauthorized:
+      description: Missing, expired, or invalid token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Token is valid but not permitted on this operation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such pool, quota, code, or claim
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: >-
+        The node cannot commit right now — no leader has been elected, the
+        leader is unreachable from this follower, or S3 is failing.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    HealthCheck:
+      type: object
+      required: [status, service, timestamp]
+      properties:
+        status: { type: string, enum: [ok, starting, draining] }
+        service: { type: string }
+        role: { type: string, enum: [starting, leader, follower] }
+        timestamp: { type: string, format: date-time }
+
+    EngineStatus:
+      type: object
+      required: [nodeId, role, seq, machines]
+      properties:
+        nodeId: { type: string }
+        role: { type: string, enum: [starting, leader, follower] }
+        seq:
+          type: integer
+          description: Sequence number of the last committed log entry.
+        endpoint: { type: string }
+        leaderEndpoint: { type: string }
+        queued: { type: integer }
+        draining: { type: boolean }
+        machines:
+          type: array
+          items: { type: string }
+
+    SeedRequest:
+      type: object
+      required: [codes]
+      properties:
+        codes:
+          type: array
+          minItems: 1
+          maxItems: 200000
+          items: { type: string, minLength: 1, maxLength: 256 }
+
+    SeedResult:
+      type: object
+      required: [pool, added, remaining]
+      properties:
+        pool: { type: string }
+        added:
+          type: integer
+          description: Codes newly added. Duplicates of existing codes are not counted.
+        remaining: { type: integer }
+
+    ClaimRequest:
+      type: object
+      properties:
+        by:
+          type: string
+          maxLength: 256
+          description: >-
+            Who the claim is for. Defaults to the token's subject, which is the
+            right answer for player-facing calls.
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Opaque data stored with the claim.
+
+    Claim:
+      type: object
+      required: [pool, code, by, claimedAt]
+      properties:
+        pool: { type: string }
+        code: { type: string }
+        by: { type: string }
+        claimedAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ReleaseRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, minLength: 1, maxLength: 256 }
+        reason: { type: string, maxLength: 512 }
+
+    ReleaseResult:
+      type: object
+      required: [pool, code, remaining]
+      properties:
+        pool: { type: string }
+        code: { type: string }
+        remaining: { type: integer }
+
+    PoolStats:
+      type: object
+      required: [pool, remaining, claimed, total]
+      properties:
+        pool: { type: string }
+        remaining: { type: integer }
+        claimed: { type: integer }
+        total: { type: integer }
+
+    DefineQuotaRequest:
+      type: object
+      required: [limit]
+      properties:
+        limit:
+          type: integer
+          minimum: 0
+          description: Maximum total that may be consumed. Per subject when `perSubject` is true.
+        perSubject:
+          type: boolean
+          default: false
+          description: >-
+            When true the ceiling applies to each subject independently rather
+            than to the quota as a whole.
+
+    ConsumeQuotaRequest:
+      type: object
+      properties:
+        subject:
+          type: string
+          maxLength: 256
+          description: Required when the quota is per-subject. Defaults to the token subject.
+        amount:
+          type: integer
+          minimum: 1
+          default: 1
+
+    ConsumeResult:
+      type: object
+      required: [quota, used, limit, remaining]
+      properties:
+        quota: { type: string }
+        subject: { type: string }
+        used: { type: integer }
+        limit: { type: integer }
+        remaining: { type: integer }
+
+    ConsumeRejected:
+      type: object
+      required: [message, errors]
+      description: >-
+        The figures sit under `errors`, which is where every error in this API
+        carries its structured detail.
+      properties:
+        message: { type: string }
+        code: { type: string, example: QUOTA_EXCEEDED }
+        errors:
+          type: object
+          required: [used, limit]
+          description: How much was already used, and the ceiling it would have crossed.
+          properties:
+            used: { type: integer }
+            limit: { type: integer }
+
+    QuotaDefinition:
+      type: object
+      required: [quota, limit, perSubject]
+      description: >-
+        What a quota is, not how much of it is left. Usage is per subject when
+        `perSubject` is true, so there is no single used/remaining pair that
+        describes the whole quota — read `GET /quotas/{quota}` for that.
+      properties:
+        quota: { type: string }
+        limit: { type: integer }
+        perSubject: { type: boolean }
+        subjects:
+          type: integer
+          description: Number of distinct subjects with recorded usage.
+
+    QuotaState:
+      type: object
+      required: [quota, limit, used, remaining, perSubject]
+      properties:
+        quota: { type: string }
+        limit: { type: integer }
+        used: { type: integer }
+        remaining: { type: integer }
+        perSubject: { type: boolean }
+        subject: { type: string }
+        subjects:
+          type: integer
+          description: Number of distinct subjects with recorded usage.
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        code: { type: string }
+        errors: {}

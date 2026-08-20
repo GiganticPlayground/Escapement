@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 640" role="img"
+     aria-label="A request passes through helmet, CORS, JSON parsing, request context, optional analytics, docs and rate limiting, then authentication, then the OpenAPI validator which dispatches to a controller; mutations go through dispatch, which either submits to the engine or forwards to the leader.">
+  <style>
+    svg { color: #4a5568; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) { svg { color: #b3bcc9; } }
+    .box { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .fill { fill: currentColor; opacity: 0.06; stroke: none; }
+    .lead { stroke-width: 2.5; }
+    .h { fill: currentColor; font-size: 13px; font-weight: 600; }
+    .s { fill: currentColor; font-size: 11.5px; opacity: 0.78; }
+    .l { fill: currentColor; font-size: 11.5px; }
+    .line { stroke: currentColor; stroke-width: 1.5; fill: none; }
+    .dash { stroke-dasharray: 5 4; }
+  </style>
+  <defs>
+    <marker id="ar-pipe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <text class="s" x="40" y="26">src/index.ts — order matters</text>
+
+  <rect class="box" x="40" y="40" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="64">helmet</text>
+  <rect class="box" x="40" y="90" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="114">cors</text>
+  <rect class="box" x="40" y="140" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="164">express.json</text>
+  <text class="s" x="326" y="164" text-anchor="end">MAX_BODY_BYTES</text>
+  <rect class="box" x="40" y="190" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="214">requestContext</text>
+  <text class="s" x="326" y="214" text-anchor="end">request id → logra</text>
+
+  <rect class="box dash" x="40" y="240" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="264">reqcast analytics</text>
+  <text class="s" x="326" y="264" text-anchor="end">optional</text>
+  <rect class="box dash" x="40" y="290" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="314">Swagger UI /api-docs</text>
+  <text class="s" x="326" y="314" text-anchor="end">optional</text>
+  <rect class="box dash" x="40" y="340" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="364">rate limit</text>
+  <text class="s" x="326" y="364" text-anchor="end">/v1/escapement · optional</text>
+
+  <rect class="fill" x="40" y="390" width="300" height="38" rx="5"/>
+  <rect class="box lead" x="40" y="390" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="414">authMiddleware</text>
+  <text class="s" x="326" y="414" text-anchor="end">token-weaver strategies</text>
+
+  <rect class="fill" x="40" y="440" width="300" height="38" rx="5"/>
+  <rect class="box lead" x="40" y="440" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="464">OpenAPI validator</text>
+  <text class="s" x="326" y="464" text-anchor="end">validates + dispatches</text>
+
+  <rect class="box" x="40" y="490" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="514">controller</text>
+  <text class="s" x="326" y="514" text-anchor="end">x-eov-operation-handler</text>
+
+  <rect class="box" x="40" y="558" width="300" height="38" rx="5"/>
+  <text class="h" x="56" y="582">error handler</text>
+  <text class="s" x="326" y="582" text-anchor="end">HttpError → JSON</text>
+
+  <path class="line" d="M 190 78 L 190 90" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 128 L 190 140" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 178 L 190 190" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 228 L 190 240" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 278 L 190 290" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 328 L 190 340" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 378 L 190 390" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 428 L 190 440" marker-end="url(#ar-pipe)"/>
+  <path class="line" d="M 190 478 L 190 490" marker-end="url(#ar-pipe)"/>
+
+  <text class="l" x="356" y="414">nothing reaches S3</text>
+  <text class="l" x="356" y="430">before this passes</text>
+  <text class="l" x="356" y="464">there is no router file</text>
+
+  <path class="line" d="M 340 509 L 430 509" marker-end="url(#ar-pipe)"/>
+  <text class="l" x="352" y="502">mutations</text>
+
+  <rect class="box" x="430" y="486" width="150" height="46" rx="5"/>
+  <text class="h" x="505" y="506" text-anchor="middle">dispatch()</text>
+  <text class="s" x="505" y="522" text-anchor="middle">role === leader ?</text>
+
+  <path class="line" d="M 580 498 L 664 452" marker-end="url(#ar-pipe)"/>
+  <text class="l" x="590" y="470">yes</text>
+  <rect class="fill" x="664" y="424" width="184" height="46" rx="5"/>
+  <rect class="box lead" x="664" y="424" width="184" height="46" rx="5"/>
+  <text class="h" x="756" y="444" text-anchor="middle">engine.submit()</text>
+  <text class="s" x="756" y="460" text-anchor="middle">resolves once durable</text>
+
+  <path class="line" d="M 580 520 L 664 566" marker-end="url(#ar-pipe)"/>
+  <text class="l" x="590" y="558">no</text>
+  <rect class="box" x="664" y="544" width="184" height="46" rx="5"/>
+  <text class="h" x="756" y="564" text-anchor="middle">forwardToLeader()</text>
+  <text class="s" x="756" y="580" text-anchor="middle">or 503 if no leader</text>
+
+  <text class="l" x="356" y="546">reads never leave RAM:</text>
+  <text class="l" x="356" y="562">controller → engine.query()</text>
+</svg>

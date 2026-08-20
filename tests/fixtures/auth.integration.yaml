@@ -1,0 +1,12 @@
+# Two callers for the failover suite: players holding HS256 tokens, and an
+# admin static token for seeding. Secrets come from the environment so this file
+# stays safe to commit.
+auth:
+  - type: hs256
+    issuer: https://players.test
+    secret: ${env:TEST_PLAYER_SECRET}
+    appClaim: app
+
+  - type: static
+    token: ${env:TEST_ADMIN_TOKEN}
+    admin: true

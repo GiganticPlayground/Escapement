@@ -1,0 +1,80 @@
+sequenceDiagram
+    autonumber
+    actor A as Client A
+    actor B as Client B
+    participant H as HTTP layer<br/>(stateless, concurrent)
+    participant Q as Claim queue
+    participant W as Writer loop<br/>(single, serialized)
+    participant M as In-memory state<br/>free list · claimed · idem keys
+    participant S3 as S3 bucket
+
+    rect rgb(238,242,248)
+    Note over W,S3: BOOT — runs once, before the server accepts traffic
+    W->>S3: GET snapshot/<latest>.json
+    S3-->>W: pool + claims as of seq N
+    loop until a key is missing (no LIST)
+        W->>S3: GET log/<seq+1>.json
+        S3-->>W: batch, or 404 — head of the log
+    end
+    W->>S3: GET lease.json, then PUT if free or expired
+    S3-->>W: lease held (advisory only)
+    W->>M: rebuild free list, claimed map, idem map
+    Note over W: seq = N+k — now serving
+    end
+
+    rect rgb(240,248,240)
+    Note over A,S3: HOT PATH — two concurrent claims, one S3 write
+    A->>H: POST /claim  (Idempotency-Key: k1)
+    B->>H: POST /claim  (Idempotency-Key: k2)
+    H->>Q: enqueue(k1) — awaits promise
+    H->>Q: enqueue(k2) — awaits promise
+    W->>Q: drain (window skipped when idle; up to maxBatch)
+    Q-->>W: [k1, k2]
+
+    loop for each request in batch
+        W->>M: idem hit? → replay prior result
+        W->>M: else takeNext() — O(1), in memory
+        M-->>W: code
+    end
+
+    Note over W,S3: nothing is acked yet — codes are only "assigned"
+    W->>S3: PUT log/000043.json  (If-None-Match: *)<br/>{seq, batchId, claims[]}
+    end
+
+    alt 200 — committed (the durability point)
+        S3-->>W: 200 OK
+        W->>M: apply batch, seq++
+        W-->>H: resolve(k1→CODE-A, k2→CODE-B)
+        H-->>A: 200 {code: CODE-A}
+        H-->>B: 200 {code: CODE-B}
+
+    else 412 — fenced by another writer
+        S3-->>W: 412 PreconditionFailed
+        Note over W: seq 43 already exists → a second<br/>writer is live. We are NOT authoritative.
+        W-->>H: reject batch
+        H-->>A: 503 Service Unavailable
+        H-->>B: 503 Service Unavailable
+        W->>W: halt process — never issue uncommitted codes
+
+    else timeout / network error — AMBIGUOUS
+        S3--xW: no response
+        Note over W: did the PUT land? Unknown.<br/>Must not ack, must not blind-retry.
+        W->>S3: GET log/000043.json
+        alt 404 — never landed
+            S3-->>W: NoSuchKey
+            W->>S3: retry PUT same seq 43
+        else 200, batchId matches ours
+            S3-->>W: our own entry
+            W->>M: apply, seq++ → ack clients normally
+        else 200, different batchId
+            S3-->>W: someone else's entry
+            W->>W: fenced → halt
+        end
+    end
+
+    rect rgb(250,246,236)
+    Note over W,S3: BACKGROUND — every N commits
+    W->>S3: PUT snapshot/000043.json (full state)
+    W->>S3: DELETE log/ entries older than PRUNE_RETAIN
+    Note over W: keeps recovery to a couple of GETs
+    end

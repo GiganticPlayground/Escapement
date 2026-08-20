@@ -1,0 +1,126 @@
+# Docker Swarm — leader + warm standby.
+#
+#   docker stack deploy -c docker-stack.yml escapement
+#
+# Both replicas are live and healthy. Exactly one holds the lease in S3 and does
+# all the writing; the other tails the log to stay warm, serves reads locally,
+# and forwards mutations to the leader over the overlay network.
+#
+# WHY THE STANDBY REPORTS HEALTHY: Swarm restarts unhealthy tasks, so a standby
+# that advertised itself as unhealthy would crash-loop forever. Traffic is
+# steered in the application (forward-to-leader), not by pulling tasks out of
+# the routing mesh.
+
+version: '3.9'
+
+services:
+  api:
+    image: ${REGISTRY:-ghcr.io/giganticplayground}/escapement:${TAG:-latest}
+
+    environment:
+      AWS_REGION: '${AWS_REGION:-us-east-1}'
+      ESCAPEMENT_S3_BUCKET: '${ESCAPEMENT_S3_BUCKET}'
+      ESCAPEMENT_KEY_PREFIX: 'escapement'
+      ESCAPEMENT_ENV: '${ESCAPEMENT_ENV:-prod}'
+      PORT: '3000'
+      NODE_ENV: 'production'
+      LOG_TYPE: 'json'
+
+      # Peers reach this task by its Swarm task name on the overlay network.
+      # Swarm substitutes the template when the task is created.
+      ESCAPEMENT_ENDPOINT_HOST: '{{.Task.Name}}'
+
+      # Worst-case failover after a hard kill. A graceful stop releases the
+      # lease immediately, so rolling deploys do not wait this out.
+      LEASE_TTL_MS: '15000'
+      FOLLOW_POLL_MS: '1000'
+      BATCH_WINDOW_MS: '50'
+      DRAIN_TIMEOUT_MS: '10000'
+
+      JWT_AUTH_MODE: 'jwt-jwks'
+      JWKS_URI: '${JWKS_URI}'
+      JWT_ISSUER: '${JWT_ISSUER}'
+      ESCAPEMENT_CONFIG_PATH: '/run/secrets/escapement_auth'
+
+      AWS_SHARED_CREDENTIALS_FILE: '/run/secrets/aws_credentials'
+
+    hostname: '{{.Task.Name}}'
+
+    # Docker secrets arrive as FILES, not env vars. The AWS SDK reads an INI
+    # credentials file, so mount one and point the SDK at it. On EC2/ECS with an
+    # instance role, drop the aws_credentials secret entirely.
+    secrets:
+      - source: aws_credentials
+        target: aws_credentials
+        mode: 0400
+      - source: escapement_auth
+        target: escapement_auth
+        mode: 0400
+
+    networks:
+      - escapement
+
+    ports:
+      - target: 3000
+        published: 3000
+        protocol: tcp
+        mode: ingress
+
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3000/health']
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+    # Must exceed DRAIN_TIMEOUT_MS so the leader finishes in-flight commits and
+    # releases the lease before SIGKILL.
+    stop_grace_period: 25s
+
+    deploy:
+      mode: replicated
+      replicas: 2
+
+      placement:
+        # Never both replicas on one node — that defeats the standby.
+        max_replicas_per_node: 1
+
+      update_config:
+        # stop-first: the replacement never races the outgoing leader for the
+        # lease, and the standby is promoted in milliseconds by the release.
+        order: stop-first
+        parallelism: 1
+        delay: 20s
+        failure_action: rollback
+        monitor: 30s
+
+      rollback_config:
+        order: stop-first
+        parallelism: 1
+
+      restart_policy:
+        # A fenced leader exits 1 deliberately; Swarm restarts it and it rejoins
+        # as a follower. That is the intended self-healing path, not an error.
+        condition: any
+        delay: 5s
+        window: 60s
+
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+networks:
+  escapement:
+    driver: overlay
+    attachable: true
+
+secrets:
+  # printf '[default]\naws_access_key_id=...\naws_secret_access_key=...\n' \
+  #   | docker secret create aws_credentials -
+  aws_credentials:
+    external: true
+  # docker secret create escapement_auth ./config/escapement.yaml
+  escapement_auth:
+    external: true

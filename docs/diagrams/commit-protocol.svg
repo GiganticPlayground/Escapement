@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" role="img"
+     aria-label="Concurrent commands are queued, decided in memory, and written as one conditional PUT; a 200 commits, while a 412 or a timeout is resolved by reading the entry back and comparing batchId, which either confirms the commit or proves the writer was fenced.">
+  <style>
+    svg { color: #4a5568; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) { svg { color: #b3bcc9; } }
+    .box { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .lead { stroke-width: 2.5; }
+    .fill { fill: currentColor; opacity: 0.06; stroke: none; }
+    .h { fill: currentColor; font-size: 13px; font-weight: 600; }
+    .s { fill: currentColor; font-size: 11.5px; opacity: 0.78; }
+    .l { fill: currentColor; font-size: 11.5px; }
+    .line { stroke: currentColor; stroke-width: 1.5; fill: none; }
+    .rule { stroke: currentColor; stroke-width: 1.5; stroke-dasharray: 6 5; opacity: 0.85; }
+    .dash { stroke-dasharray: 5 4; }
+  </style>
+  <defs>
+    <marker id="ar-commit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <rect class="box" x="30" y="40" width="150" height="70" rx="5"/>
+  <text class="h" x="105" y="66" text-anchor="middle">Concurrent</text>
+  <text class="h" x="105" y="84" text-anchor="middle">commands</text>
+  <text class="s" x="105" y="102" text-anchor="middle">with Idempotency-Key</text>
+
+  <rect class="box" x="220" y="40" width="170" height="70" rx="5"/>
+  <text class="h" x="305" y="64" text-anchor="middle">Queue</text>
+  <text class="s" x="305" y="84" text-anchor="middle">window skipped when idle;</text>
+  <text class="s" x="305" y="100" text-anchor="middle">splice up to MAX_BATCH</text>
+
+  <rect class="box" x="430" y="40" width="200" height="70" rx="5"/>
+  <text class="h" x="530" y="64" text-anchor="middle">decide() — pure</text>
+  <text class="s" x="530" y="84" text-anchor="middle">idempotent replay · reject ·</text>
+  <text class="s" x="530" y="100" text-anchor="middle">immediate · commit</text>
+
+  <line class="line" x1="180" y1="75" x2="214" y2="75" marker-end="url(#ar-commit)"/>
+  <line class="line" x1="390" y1="75" x2="424" y2="75" marker-end="url(#ar-commit)"/>
+
+  <path class="line" d="M 530 110 L 530 150" marker-end="url(#ar-commit)"/>
+  <text class="l" x="542" y="134">one LogEntry, many commits</text>
+
+  <rect class="fill" x="380" y="150" width="300" height="58" rx="5"/>
+  <rect class="box lead" x="380" y="150" width="300" height="58" rx="5"/>
+  <text class="h" x="530" y="174" text-anchor="middle">PUT log/&lt;seq&gt;.json</text>
+  <text class="s" x="530" y="194" text-anchor="middle">If-None-Match: *</text>
+
+  <line class="rule" x1="30" y1="238" x2="870" y2="238"/>
+  <text class="h" x="30" y="230">the durability point — nothing above this line is true yet</text>
+
+  <rect class="box" x="30" y="268" width="240" height="86" rx="5"/>
+  <text class="h" x="46" y="292">200 — committed</text>
+  <text class="s" x="46" y="314">apply() into state, seq++</text>
+  <text class="s" x="46" y="332">record idempotency keys</text>
+  <text class="s" x="46" y="348">resolve every caller</text>
+
+  <rect class="box" x="300" y="268" width="290" height="86" rx="5"/>
+  <text class="h" x="316" y="292">412, or a timeout</text>
+  <text class="s" x="316" y="314">indistinguishable, so treated alike:</text>
+  <text class="s" x="316" y="332">GET the key back and compare</text>
+  <text class="s" x="316" y="348">batchId — one question, one GET</text>
+
+  <path class="line" d="M 470 208 L 200 262" marker-end="url(#ar-commit)"/>
+  <path class="line" d="M 570 208 L 470 262" marker-end="url(#ar-commit)"/>
+
+  <path class="line" d="M 420 354 L 340 404" marker-end="url(#ar-commit)"/>
+  <path class="line" d="M 500 354 L 610 404" marker-end="url(#ar-commit)"/>
+
+  <rect class="box" x="150" y="410" width="230" height="76" rx="5"/>
+  <text class="h" x="166" y="434">batchId is ours</text>
+  <text class="s" x="166" y="456">the write landed after all</text>
+  <text class="s" x="166" y="474">→ treat exactly as committed</text>
+
+  <rect class="fill" x="470" y="410" width="290" height="76" rx="5"/>
+  <rect class="box lead" x="470" y="410" width="290" height="76" rx="5"/>
+  <text class="h" x="486" y="434">batchId is someone else's — fenced</text>
+  <text class="s" x="486" y="456">a second writer owns this sequence</text>
+  <text class="s" x="486" y="474">→ reject callers, then exit the process</text>
+
+  <rect class="box dash" x="470" y="512" width="290" height="66" rx="5"/>
+  <text class="h" x="486" y="536">still undeterminable after 6 tries</text>
+  <text class="s" x="486" y="558">→ exit; the log is the only thing that knows</text>
+  <path class="line" d="M 615 486 L 615 506" marker-end="url(#ar-commit)"/>
+
+  <text class="l" x="30" y="530">Returning codes to the pool risks issuing them twice;</text>
+  <text class="l" x="30" y="548">rejecting callers risks losing codes that did commit.</text>
+  <text class="l" x="30" y="566">Exiting rebuilds from the log, which is the only</text>
+  <text class="l" x="30" y="584">thing that knows what happened.</text>
+</svg>

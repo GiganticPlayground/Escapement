@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" role="img"
+     aria-label="Compaction leaves a pruned range, a retained margin and a live tail; recovery loads the newest snapshot then walks the log one sequence at a time until a key is missing, without ever listing a prefix.">
+  <style>
+    svg { color: #4a5568; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) { svg { color: #b3bcc9; } }
+    .box { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .lead { stroke-width: 2.5; }
+    .fill { fill: currentColor; opacity: 0.06; stroke: none; }
+    .ghost { fill: currentColor; opacity: 0.03; stroke: none; }
+    .h { fill: currentColor; font-size: 13px; font-weight: 600; }
+    .s { fill: currentColor; font-size: 11.5px; opacity: 0.78; }
+    .l { fill: currentColor; font-size: 11.5px; }
+    .line { stroke: currentColor; stroke-width: 1.5; fill: none; }
+    .dash { stroke-dasharray: 5 4; }
+    .faint { opacity: 0.4; }
+  </style>
+  <defs>
+    <marker id="ar-store" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <text class="h" x="30" y="30">The log, as compaction leaves it</text>
+
+  <rect class="ghost" x="30" y="50" width="230" height="52" rx="5"/>
+  <rect class="box dash faint" x="30" y="50" width="230" height="52" rx="5"/>
+  <text class="s" x="145" y="74" text-anchor="middle">pruned</text>
+  <text class="s" x="145" y="92" text-anchor="middle">superseded by the snapshot</text>
+
+  <rect class="fill" x="270" y="50" width="180" height="52" rx="5"/>
+  <rect class="box" x="270" y="50" width="180" height="52" rx="5"/>
+  <text class="s" x="360" y="74" text-anchor="middle">retained margin</text>
+  <text class="s" x="360" y="92" text-anchor="middle">PRUNE_RETAIN entries</text>
+
+  <rect class="fill" x="460" y="50" width="230" height="52" rx="5"/>
+  <rect class="box lead" x="460" y="50" width="230" height="52" rx="5"/>
+  <text class="s" x="575" y="74" text-anchor="middle">live tail</text>
+  <text class="s" x="575" y="92" text-anchor="middle">since the last snapshot</text>
+
+  <line class="line dash" x1="270" y1="42" x2="270" y2="120"/>
+  <text class="l" x="278" y="136">prune horizon</text>
+  <line class="line dash" x1="460" y1="42" x2="460" y2="120"/>
+  <text class="l" x="468" y="136">snapshot seq</text>
+  <line class="line dash" x1="690" y1="42" x2="690" y2="120"/>
+  <text class="l" x="698" y="136">head</text>
+
+  <text class="l" x="30" y="166">The margin exists because a reader may already hold a key it has not fetched yet.</text>
+
+  <text class="h" x="30" y="214">Recovery</text>
+  <rect class="box" x="30" y="230" width="170" height="56" rx="5"/>
+  <text class="h" x="115" y="254" text-anchor="middle">GET newest</text>
+  <text class="h" x="115" y="272" text-anchor="middle">snapshot</text>
+
+  <line class="line" x1="200" y1="258" x2="238" y2="258" marker-end="url(#ar-store)"/>
+
+  <rect class="box" x="244" y="230" width="230" height="56" rx="5"/>
+  <text class="h" x="359" y="252" text-anchor="middle">GET log/&lt;seq+1&gt;, replay,</text>
+  <text class="h" x="359" y="270" text-anchor="middle">repeat</text>
+
+  <line class="line" x1="474" y1="258" x2="512" y2="258" marker-end="url(#ar-store)"/>
+
+  <rect class="box" x="518" y="230" width="180" height="56" rx="5"/>
+  <text class="h" x="608" y="252" text-anchor="middle">404 — stop</text>
+  <text class="s" x="608" y="270" text-anchor="middle">no LIST anywhere</text>
+
+  <line class="line" x1="698" y1="258" x2="736" y2="258" marker-end="url(#ar-store)"/>
+  <rect class="fill" x="742" y="230" width="130" height="56" rx="5"/>
+  <rect class="box lead" x="742" y="230" width="130" height="56" rx="5"/>
+  <text class="h" x="807" y="254" text-anchor="middle">serving</text>
+  <text class="s" x="807" y="272" text-anchor="middle">state in RAM</text>
+
+  <text class="l" x="30" y="316">A 404 while the lease reports a higher seq means this node fell behind the horizon — it exits and rebuilds.</text>
+</svg>
