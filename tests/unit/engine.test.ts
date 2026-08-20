@@ -10,6 +10,15 @@ import { MemoryLogStore, silentLogger } from '../fakes/memory-log-store';
 
 const AT = '2026-08-19T12:00:00.000Z';
 
+/** Poll for a condition instead of sleeping a fixed time — compaction is fire-and-forget. */
+async function waitFor(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** `pruneRetain: 0` unless a test says otherwise, so pruning is easy to observe. */
 function buildEngine(store: MemoryLogStore, overrides: Partial<EngineOptions> = {}): Engine {
   return new Engine({
@@ -215,19 +224,8 @@ describe('Engine', () => {
 
   it('recovers from a snapshot once the log has been pruned', async () => {
     const store = new MemoryLogStore();
-    const engine = new Engine({
-      store: store.asLogStore(),
-      machines: [poolMachine, quotaMachine],
-      endpoint: 'http://self:3000',
-      batchWindowMs: 1,
-      maxBatch: 500,
-      leaseTtlMs: 30_000,
-      followPollMs: 1_000,
-      snapshotEvery: 2, // compact aggressively
-      pruneRetain: 0,
-      idempotencyLimit: 1_000,
-      logger: silentLogger,
-    });
+    // snapshotEvery: 2 compacts aggressively.
+    const engine = buildEngine(store, { batchWindowMs: 1, snapshotEvery: 2 });
     await engine.start();
     // seed = commit 1, then three claims. With snapshotEvery=2 that compacts at
     // seq 2 and again at seq 4, and the second pass prunes the whole log.
@@ -235,7 +233,7 @@ describe('Engine', () => {
     await claim(engine, 'c1');
     await claim(engine, 'c2');
     await claim(engine, 'c3');
-    await new Promise((r) => setTimeout(r, 80)); // compaction is fire-and-forget
+    await waitFor(() => store.snapshots.length >= 2 && store.log.size === 0);
     await engine.shutdown(100);
 
     assert.ok(store.snapshots.length >= 2, 'snapshots were written');
@@ -259,23 +257,11 @@ describe('Engine', () => {
 
   it('rebuilds from a snapshot plus the log entries written after it', async () => {
     const store = new MemoryLogStore();
-    const engine = new Engine({
-      store: store.asLogStore(),
-      machines: [poolMachine, quotaMachine],
-      endpoint: 'http://self:3000',
-      batchWindowMs: 1,
-      maxBatch: 500,
-      leaseTtlMs: 30_000,
-      followPollMs: 1_000,
-      snapshotEvery: 2,
-      pruneRetain: 0,
-      idempotencyLimit: 1_000,
-      logger: silentLogger,
-    });
+    const engine = buildEngine(store, { batchWindowMs: 1, snapshotEvery: 2 });
     await engine.start();
     await seed(engine, ['A', 'B', 'C', 'D']);
     await claim(engine, 'x1'); // snapshot at seq 2
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => store.snapshots.length >= 1);
     await claim(engine, 'x2'); // seq 3 — after the snapshot, still in the log
     await engine.shutdown(100);
 
@@ -410,7 +396,7 @@ describe('Engine', () => {
     assert.equal(fatals.length, 0);
 
     // The first poll reads the lease, the next one acts on it.
-    await new Promise((r) => setTimeout(r, 120));
+    await waitFor(() => fatals.length > 0);
     assert.equal(fatals.length > 0, true, 'it refused to keep serving stale state');
     assert.match(fatals[0]!, /fell behind the prune horizon/);
     await engine.shutdown(100);
@@ -424,7 +410,7 @@ describe('Engine', () => {
     await claim(engine, 'c1');
     await claim(engine, 'c2');
     await claim(engine, 'c3');
-    await new Promise((r) => setTimeout(r, 80)); // compaction is fire-and-forget
+    await waitFor(() => store.snapshots.length >= 1 && store.log.size <= 2);
     await engine.shutdown(100);
 
     assert.ok(store.snapshots.length >= 1, 'it still compacts');
@@ -455,18 +441,11 @@ describe('Engine', () => {
     await full.shutdown(100);
 
     // A build that no longer registers `quota` — a rollback, or a rename.
-    const rolledBack = new Engine({
-      store: store.asLogStore(),
+    // snapshotEvery: 1 compacts at every opportunity.
+    const rolledBack = buildEngine(store, {
       machines: [poolMachine],
-      endpoint: 'http://self:3000',
       batchWindowMs: 1,
-      maxBatch: 500,
-      leaseTtlMs: 30_000,
-      followPollMs: 1_000,
-      snapshotEvery: 1, // compact at every opportunity
-      pruneRetain: 0,
-      idempotencyLimit: 1_000,
-      logger: silentLogger,
+      snapshotEvery: 1,
     });
     await rolledBack.start();
     await seed(rolledBack, ['A', 'B']);
@@ -495,5 +474,147 @@ describe('Engine', () => {
     assert.ok(store.lease);
     await engine.shutdown(100);
     assert.equal(store.lease, null);
+  });
+
+  it('rejects, not answers, an in-batch duplicate key when the batch is fenced', async () => {
+    // The second command shares the first one's key inside a single batch, so
+    // its answer IS the first one's provisional result. If the batch fences,
+    // that result never committed — delivering it would hand out a code the
+    // rebuilt state still considers free.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A', 'B', 'C']);
+
+    store.fenceNextAppend = true;
+    const settled = await Promise.allSettled([claim(engine, 'dup'), claim(engine, 'dup')]);
+    assert.ok(
+      settled.every((s) => s.status === 'rejected'),
+      'neither caller got a 200 for a commit that never happened',
+    );
+    for (const s of settled) {
+      assert.match(String(s.reason), /fenced/i);
+    }
+    assert.equal(fatals.length, 1);
+  });
+
+  it('withholds a state-dependent rejection until the batch is durable', async () => {
+    // Pool has one code; two claims share a batch. The second is refused only
+    // because the first PROVISIONALLY took the last code. When the batch then
+    // fences, that history never committed — the refusal must become a
+    // retryable 503, not a definitive "exhausted" that was never true.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['ONLY']);
+
+    store.fenceNextAppend = true;
+    const settled = await Promise.allSettled([claim(engine, 'a'), claim(engine, 'b')]);
+    assert.ok(settled.every((s) => s.status === 'rejected'));
+    for (const s of settled) {
+      const reason = String(s.reason);
+      assert.match(reason, /fenced/i, `retryable, not definitive: ${reason}`);
+      assert.doesNotMatch(reason, /no unclaimed codes/);
+    }
+  });
+
+  it('does not answer a write that landed in a pruned slot', async () => {
+    // If-None-Match only fences a slot that still exists. A pauses at seq 1;
+    // B takes over, commits past it, snapshots, and prunes — deleting the keys.
+    // A wakes and appends seq 2: the key is gone, so the conditional write
+    // SUCCEEDS. The post-commit leadership check is the only thing standing
+    // between A and resolving callers with codes B may already have issued.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A', 'B', 'C']); // seq 1 — this node believes head = 1
+
+    // B's tenure while this node is "paused": B holds the lease, committed to
+    // seq 6, and pruned the log behind its snapshot — seq 2 is creatable again.
+    store.takeLease({
+      writerId: 'B',
+      endpoint: 'http://b:3000',
+      expiresAt: Date.now() + 60_000,
+      seq: 6,
+    });
+    store.log.delete(1);
+
+    const settled = await Promise.allSettled([claim(engine, 'stale')]);
+    assert.ok(store.log.has(2), 'the conditional write really did land in the pruned slot');
+    assert.equal(settled[0].status, 'rejected', 'the stale leader must not answer');
+    assert.match(String(settled[0].reason), /[Ll]eadership/);
+    assert.equal(fatals.length, 1);
+    assert.notEqual(engine.role, 'leader');
+  });
+
+  it('steps down on renew instead of stealing the lease back', async () => {
+    // A leader paused past its TTL wakes to find a peer holding the lease. Its
+    // renew is conditional on the etag it last wrote, so it fails — and the
+    // node must demote itself, not overwrite the new leader's lease and start
+    // advertising arbitrarily stale reads.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    assert.equal(engine.role, 'leader');
+
+    const theirs = {
+      writerId: 'B',
+      endpoint: 'http://b:3000',
+      expiresAt: Date.now() + 60_000,
+      seq: 5,
+    };
+    store.takeLease(theirs);
+
+    // Drive the renewal directly rather than waiting out the timer.
+    await (engine as unknown as { renewLease(): Promise<void> }).renewLease();
+
+    assert.deepEqual(store.lease, theirs, "the renew did not overwrite the new leader's lease");
+    assert.equal(fatals.length, 1);
+    assert.match(fatals[0]!, /lease/i);
+    assert.notEqual(engine.role, 'leader');
+  });
+
+  it("graceful shutdown leaves another node's lease alone", async () => {
+    // A drain that outlives the lease TTL means a peer may already have taken
+    // over; the shutdown's delete must be verified, or it removes the NEW
+    // leader's lease and forces a second, avoidable election.
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store);
+    await engine.start();
+
+    const theirs = {
+      writerId: 'B',
+      endpoint: 'http://b:3000',
+      expiresAt: Date.now() + 60_000,
+      seq: 5,
+    };
+    store.takeLease(theirs);
+
+    await engine.shutdown(100);
+    assert.deepEqual(store.lease, theirs, 'the release skipped a lease that is not ours');
+  });
+
+  it('settles commands queued behind a fenced batch instead of stranding them', async () => {
+    // With maxBatch=1 the second claim is still in the queue when the first
+    // one's batch fences. fatal() must flush it — with the default process-exit
+    // onFatal nothing observes the leak, but an embedder that keeps the process
+    // alive would hold its caller's request open forever.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { maxBatch: 1, onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A', 'B', 'C']);
+
+    store.fenceNextAppend = true;
+    const settled = await Promise.allSettled([claim(engine, 'first'), claim(engine, 'second')]);
+    assert.ok(
+      settled.every((s) => s.status === 'rejected'),
+      'nothing behind the failed batch hangs',
+    );
+    assert.equal(fatals.length, 1);
   });
 });

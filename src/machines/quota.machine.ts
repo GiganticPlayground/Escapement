@@ -89,9 +89,12 @@ export const quotaMachine: StateMachine<QuotaState, QuotaCommand, QuotaEvent, Js
         // Defining answers with the definition, not with a usage position.
         // Usage is per subject when the ceiling is, so there is no single
         // used/remaining pair that means anything here — ask GET for that, with
-        // a subject. Redefining preserves whatever has already been consumed, so
-        // a lowered ceiling can land already exhausted rather than silently
-        // forgiving spend.
+        // a subject. Redefining preserves the counters as recorded: a lowered
+        // ceiling can land already exhausted rather than silently forgiving
+        // spend. Flipping `perSubject`, though, changes which counter is
+        // authoritative — a global quota never tracked subjects, so redefining
+        // it per-subject starts every subject at 0 (and the reverse enforces
+        // against the accumulated global total). Flip with that in mind.
         const definition = {
           quota: command.quota,
           limit: command.limit,

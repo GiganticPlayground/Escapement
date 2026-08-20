@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { LogStore } from './log-store';
+import { isPreconditionFailed, LogStore } from './log-store';
 import type {
   Command,
   CommitRecord,
@@ -44,11 +44,11 @@ export interface EngineOptions {
   /**
    * Log entries kept behind a snapshot rather than pruned immediately.
    *
-   * A reader LISTs the log and then GETs each key. Pruning to the head lets a
-   * delete land between those two calls, so the reader asks for a key that no
-   * longer exists. Retaining a margin keeps anything a reader could plausibly
-   * have just listed fetchable; it must comfortably exceed the commits a
-   * follower can miss in one `followPollMs`.
+   * A follower GET-walks the log one seq at a time (see `catchUp`). Pruning to
+   * the head lets a delete land on the very entry a lagging follower is about
+   * to fetch, forcing it to exit and rebuild. Retaining a margin keeps anything
+   * a follower could plausibly still need fetchable; it must comfortably exceed
+   * the commits a follower can miss in one `followPollMs`.
    */
   pruneRetain: number;
   /** How many idempotency records to keep in memory and in the snapshot. */
@@ -109,6 +109,10 @@ export class Engine {
   private seq = 0;
   private commitsSinceSnapshot = 0;
   private leaseTimer: NodeJS.Timeout | undefined;
+  /** Etag of the lease this node last wrote. Renewal is conditional on it. */
+  private leaseEtag: string | undefined;
+  /** True while a batch is between splice and settlement; shutdown waits on it. */
+  private commitInFlight = false;
 
   constructor(opts: EngineOptions) {
     this.opts = opts;
@@ -153,10 +157,13 @@ export class Engine {
 
     const acquired = await this.store.tryAcquireLease(this.buildLease());
     if (acquired.won) {
+      this.leaseEtag = acquired.etag;
       this.becomeLeader();
     } else {
-      this.leaderEndpoint = acquired.held.endpoint;
-      this.noteLeaseHead(acquired.held);
+      if (acquired.held) {
+        this.leaderEndpoint = acquired.held.endpoint;
+        this.noteLeaseHead(acquired.held);
+      }
       this.becomeFollower();
     }
   }
@@ -306,11 +313,41 @@ export class Engine {
     void this.followLoop();
   }
 
+  /**
+   * Renew conditionally on the etag of the lease we last wrote. A 412 means a
+   * peer replaced our lease while we were paused or partitioned — we are a stale
+   * leader with arbitrarily old state, so step down rather than steal it back.
+   * (An unconditional renew here was exactly how a resurrected leader used to
+   * re-advertise itself and serve unboundedly stale reads.)
+   */
   private async renewLease(): Promise<void> {
     if (this.role !== 'leader' || this.draining) return;
+    if (!this.leaseEtag) {
+      this.fatal('leader has no lease etag to renew against — exiting to rejoin as a follower');
+      return;
+    }
     try {
-      await this.store.renewLease(this.buildLease());
+      this.leaseEtag = await this.store.renewLease(this.buildLease(), this.leaseEtag);
     } catch (err) {
+      if (isPreconditionFailed(err)) {
+        this.fatal('lease was taken by another node — exiting to rejoin as a follower');
+        return;
+      }
+      // Ambiguous: the PUT may or may not have landed. Read back to learn which,
+      // and to whom the lease now belongs.
+      try {
+        const current = await this.store.readLease();
+        if (current && current.lease.writerId !== this.nodeId) {
+          this.fatal('lease is held by another node — exiting to rejoin as a follower');
+          return;
+        }
+        if (current) {
+          this.leaseEtag = current.etag;
+          return;
+        }
+      } catch {
+        /* fall through to the warn below */
+      }
       // Survivable: the log CAS still fences us if someone else takes over.
       this.opts.logger.warn('lease renew failed', { err: String(err) });
     }
@@ -324,13 +361,18 @@ export class Engine {
         await this.catchUp();
         const acquired = await this.store.tryAcquireLease(this.buildLease());
         if (acquired.won) {
+          this.leaseEtag = acquired.etag;
           await this.catchUp(); // final read before accepting writes
           this.becomeLeader();
           return;
         }
-        this.leaderEndpoint = acquired.held.endpoint;
-        // Read after this poll's catchUp, so the next one gets to use it.
-        this.noteLeaseHead(acquired.held);
+        if (acquired.held) {
+          this.leaderEndpoint = acquired.held.endpoint;
+          // Read after this poll's catchUp, so the next one gets to use it.
+          this.noteLeaseHead(acquired.held);
+        } else {
+          this.leaderEndpoint = undefined;
+        }
       } catch (err) {
         this.opts.logger.warn('follower poll failed', { err: String(err) });
       }
@@ -401,12 +443,15 @@ export class Engine {
       if (!wasIdle) await new Promise((r) => setTimeout(r, this.opts.batchWindowMs));
       wasIdle = false;
       const batch = this.queue.splice(0, this.opts.maxBatch);
+      this.commitInFlight = true;
       try {
         await this.commitBatch(batch);
       } catch (err) {
         for (const p of batch) p.reject(err as Error);
         this.fatal(`commit failed irrecoverably: ${String(err)}`);
         return;
+      } finally {
+        this.commitInFlight = false;
       }
     }
   }
@@ -420,10 +465,18 @@ export class Engine {
       commits: [],
     };
 
-    /** Resolve without touching S3: replays, rejections, no-op decisions. */
-    const immediate: Array<[Pending, Json]> = [];
-    const failed: Array<[Pending, HttpError]> = [];
-    /** True only if the PUT lands. Index-aligned with `entry.commits`. */
+    /** Replays of already-durable results — the only answers safe before the PUT. */
+    const replays: Array<[Pending, Json]> = [];
+    /**
+     * Everything else decided in this batch: in-batch key collisions, immediate
+     * results, and rejections. Any of these may have read state that an earlier
+     * command in this same batch changed provisionally, so none of it is true
+     * until the batch is durable. Settled only after the append lands; a fenced
+     * batch turns every one of these into a retryable 503, because the state
+     * they were decided against never committed.
+     */
+    const decided: Array<{ pending: Pending; ok?: Json; err?: HttpError }> = [];
+    /** Resolved from `entry.commits` once the PUT lands. Index-aligned with it. */
     const provisional: Pending[] = [];
     /** Two commands in the SAME batch sharing an idempotency key. */
     const batchKeys = new Map<string, Json>();
@@ -433,12 +486,12 @@ export class Engine {
 
       const prior = this.idempotency.get(key) ?? undefined;
       if (prior) {
-        immediate.push([pending, prior.result]);
+        replays.push([pending, prior.result]);
         continue;
       }
       const inBatch = batchKeys.get(key);
       if (inBatch !== undefined) {
-        immediate.push([pending, inBatch]);
+        decided.push({ pending, ok: inBatch });
         continue;
       }
 
@@ -452,7 +505,10 @@ export class Engine {
           machine: machineName,
           err: String(err),
         });
-        failed.push([pending, new HttpError(500, 'State machine failed to handle the command')]);
+        decided.push({
+          pending,
+          err: new HttpError(500, 'State machine failed to handle the command'),
+        });
         continue;
       }
 
@@ -460,11 +516,11 @@ export class Engine {
         const err = new HttpError(decision.status, decision.message);
         if (decision.code) err.name = decision.code;
         if (decision.body !== undefined) err.errors = decision.body;
-        failed.push([pending, err]);
+        decided.push({ pending, err });
         continue;
       }
       if (decision.kind === 'immediate') {
-        immediate.push([pending, decision.result]);
+        decided.push({ pending, ok: decision.result });
         continue;
       }
 
@@ -485,35 +541,90 @@ export class Engine {
       provisional.push(pending);
     }
 
-    for (const [pending, result] of immediate) pending.resolve(result);
-    for (const [pending, err] of failed) pending.reject(err);
-    if (entry.commits.length === 0) return; // nothing new to make durable
+    for (const [pending, result] of replays) pending.resolve(result);
 
-    const outcome = await this.store.append(entry);
+    if (entry.commits.length > 0) {
+      const outcome = await this.store.append(entry);
 
-    if (outcome === 'fenced') {
-      for (const pending of provisional) {
-        pending.reject(new UpstreamUnavailableError('Writer was fenced'));
+      if (outcome === 'fenced') {
+        this.failBatch(provisional, decided, 'Writer was fenced');
+        this.fatal(
+          `seq ${entry.seq} was written by another node — exiting so this one restarts as a follower`,
+        );
+        return;
       }
-      this.fatal(
-        `seq ${entry.seq} was written by another node — exiting so this one restarts as a follower`,
-      );
-      return;
+
+      // The append landed, but If-None-Match only fences a slot that still
+      // exists: compaction deletes log keys, so a writer paused long enough for
+      // a successor to commit past this seq AND prune it can create the slot
+      // afresh — invisibly to recovery, which starts at a newer snapshot. One
+      // lease GET (an 8% add on the PUT this batch already paid for) closes
+      // that: if the lease is not ours, a successor exists and nothing decided
+      // here may reach a caller.
+      if (!(await this.confirmLeadership())) {
+        this.failBatch(provisional, decided, 'Leadership could not be confirmed after the commit');
+        this.fatal(
+          `lease is no longer this node's after committing seq ${entry.seq} — ` +
+            `exiting so this one restarts as a follower`,
+        );
+        return;
+      }
+
+      // Durable. Only now is any of this true.
+      this.seq = entry.seq;
+      for (const commit of entry.commits) {
+        this.rememberIdempotent(commit.key, { machine: commit.machine, result: commit.result });
+      }
     }
 
-    // Durable. Only now is any of this true.
-    this.seq = entry.seq;
-    for (const commit of entry.commits) {
-      this.rememberIdempotent(commit.key, { machine: commit.machine, result: commit.result });
-    }
     for (const [i, pending] of provisional.entries()) {
       pending.resolve(entry.commits[i]!.result);
     }
+    for (const d of decided) {
+      if (d.err) d.pending.reject(d.err);
+      else d.pending.resolve(d.ok!);
+    }
 
-    if (++this.commitsSinceSnapshot >= this.opts.snapshotEvery) {
+    if (entry.commits.length > 0 && ++this.commitsSinceSnapshot >= this.opts.snapshotEvery) {
       this.commitsSinceSnapshot = 0;
       void this.compact();
     }
+  }
+
+  /** Reject everything a failed batch had in flight with a retryable 503. */
+  private failBatch(
+    provisional: Pending[],
+    decided: Array<{ pending: Pending; ok?: Json; err?: HttpError }>,
+    message: string,
+  ): void {
+    for (const pending of provisional) {
+      pending.reject(new UpstreamUnavailableError(message));
+    }
+    for (const d of decided) {
+      d.pending.reject(new UpstreamUnavailableError(message));
+    }
+  }
+
+  /**
+   * One GET after every committed batch: is the lease still ours?
+   *
+   * This is the fence for the pruned-slot case (see `commitBatch`). Retried a
+   * few times on transient errors; an undeterminable answer fails closed — the
+   * commit IS durable, so rejected callers that retry against the next leader
+   * are answered from the idempotency record, never re-issued.
+   */
+  private async confirmLeadership(): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const current = await this.store.readLease();
+        if (current?.lease.writerId !== this.nodeId) return false;
+        this.leaseEtag = current.etag ?? this.leaseEtag;
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 25 * 2 ** attempt));
+      }
+    }
+    return false;
   }
 
   /**
@@ -553,8 +664,8 @@ export class Engine {
         })),
       };
       await this.store.writeSnapshot(snapshot);
-      // Never prune to the head: a reader that listed these keys may not have
-      // fetched them yet. See `pruneRetain`.
+      // Never prune to the head: a follower may be GET-walking these entries
+      // right now. See `pruneRetain`.
       const pruneTo = upTo - this.opts.pruneRetain;
       const pruned = pruneTo > 0 ? await this.store.pruneLog(pruneTo) : 0;
       this.opts.logger.info('snapshot written', {
@@ -571,6 +682,12 @@ export class Engine {
   private fatal(reason: string): void {
     this.role = 'starting';
     if (this.leaseTimer) clearInterval(this.leaseTimer);
+    // Commands queued behind the failed batch must not hang forever. The default
+    // onFatal exits the process, but an embedder that keeps it alive (tests do)
+    // still needs every pending promise settled.
+    for (const pending of this.queue.splice(0)) {
+      pending.reject(new UpstreamUnavailableError('Node is restarting'));
+    }
     this.opts.logger.error('fatal', { reason });
     if (this.opts.onFatal) {
       this.opts.onFatal(reason);
@@ -588,13 +705,16 @@ export class Engine {
     this.wake?.();
 
     const deadline = Date.now() + drainTimeoutMs;
-    while (this.queue.length > 0 && Date.now() < deadline) {
+    while ((this.queue.length > 0 || this.commitInFlight) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 25));
     }
 
     if (this.role === 'leader') {
       try {
-        await this.store.releaseLease();
+        // Verified delete: renewal stopped when draining began, so if the drain
+        // outlived the TTL a peer may already hold the lease — deleting THEIR
+        // lease would force a second, avoidable election.
+        await this.store.releaseLease(this.nodeId);
         this.opts.logger.info('lease released — standby can take over immediately');
       } catch (err) {
         this.opts.logger.warn('lease release failed', { err: String(err) });

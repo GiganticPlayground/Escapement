@@ -13,6 +13,9 @@ export class MemoryLogStore {
   readonly log = new Map<number, LogEntry>();
   readonly snapshots: SnapshotFile[] = [];
   lease: Lease | null = null;
+  /** Bumped on every lease write, the way S3 mints a new etag per PUT. */
+  leaseEtag = 'etag-0';
+  private leaseWrites = 0;
   appendCalls = 0;
 
   /** Set to make the next append behave as though another writer won the slot. */
@@ -64,20 +67,38 @@ export class MemoryLogStore {
     return removed;
   }
 
-  async tryAcquireLease(mine: Lease): Promise<{ won: true } | { won: false; held: Lease }> {
+  /** Another node's takeover, for tests: replaces the lease and mints a new etag. */
+  takeLease(lease: Lease): void {
+    this.lease = lease;
+    this.leaseEtag = `etag-${++this.leaseWrites}`;
+  }
+
+  async readLease(): Promise<{ lease: Lease; etag: string | undefined } | null> {
+    return this.lease === null ? null : { lease: this.lease, etag: this.leaseEtag };
+  }
+
+  async tryAcquireLease(
+    mine: Lease,
+  ): Promise<{ won: true; etag: string | undefined } | { won: false; held: Lease | null }> {
     if (this.lease && this.lease.expiresAt > Date.now()) {
       return { won: false, held: this.lease };
     }
-    this.lease = mine;
-    return { won: true };
+    this.takeLease(mine);
+    return { won: true, etag: this.leaseEtag };
   }
 
-  async renewLease(mine: Lease): Promise<void> {
-    this.lease = mine;
+  /** Conditional, like S3's If-Match: a renew against a replaced lease fails. */
+  async renewLease(mine: Lease, etag: string): Promise<string | undefined> {
+    if (this.lease === null || etag !== this.leaseEtag) {
+      throw Object.assign(new Error('PreconditionFailed'), { name: 'PreconditionFailed' });
+    }
+    this.takeLease(mine);
+    return this.leaseEtag;
   }
 
-  async releaseLease(): Promise<void> {
-    this.lease = null;
+  /** Verified delete, like the real store: only the holder's release removes it. */
+  async releaseLease(writerId: string): Promise<void> {
+    if (this.lease?.writerId === writerId) this.lease = null;
   }
 
   asLogStore(): LogStore {

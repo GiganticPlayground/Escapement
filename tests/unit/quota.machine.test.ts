@@ -144,6 +144,31 @@ describe('quotaMachine', () => {
     });
   });
 
+  it('flipping a global quota to per-subject starts every subject fresh', () => {
+    // A global quota never tracked who spent what, so there is nothing to carry
+    // into per-subject counters: the flip changes which counter is authoritative,
+    // and every subject starts at 0. Documented behavior, not an accident — the
+    // global total is still recorded, so flipping back re-enforces against it.
+    const state = defined(3, false);
+    run(state, { type: 'consume', quota: 'q', subject: 's', amount: 3 });
+    assert.equal(quotaView(state, 'q')!.remaining, 0, 'the global ceiling is exhausted');
+
+    run(state, { type: 'define', quota: 'q', limit: 2, perSubject: true });
+    assert.equal(
+      run(state, { type: 'consume', quota: 'q', subject: 's', amount: 2 }).kind,
+      'commit',
+      'per-subject enforcement starts from zero, not from the global total',
+    );
+
+    // Flipping back to global enforces against the accumulated total again.
+    run(state, { type: 'define', quota: 'q', limit: 5, perSubject: false });
+    assert.equal(quotaView(state, 'q')!.used, 5, 'the global counter kept accumulating');
+    assert.equal(
+      run(state, { type: 'consume', quota: 'q', subject: 's', amount: 1 }).kind,
+      'reject',
+    );
+  });
+
   it('round-trips through snapshot/restore', () => {
     const state = defined(4, true);
     run(state, { type: 'consume', quota: 'q', subject: 'alice', amount: 3 });

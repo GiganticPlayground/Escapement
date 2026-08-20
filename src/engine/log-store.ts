@@ -80,12 +80,13 @@ export class LogStore {
     }
   }
 
+  /** Returns the written object's etag, which conditional lease writes need. */
   private async putJson(
     key: string,
     value: unknown,
     opts: { ifNoneMatch?: boolean; ifMatch?: string | undefined } = {},
-  ): Promise<void> {
-    await this.s3.send(
+  ): Promise<string | undefined> {
+    const res = await this.s3.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
@@ -95,6 +96,7 @@ export class LogStore {
         ...(opts.ifMatch ? { IfMatch: opts.ifMatch } : {}),
       }),
     );
+    return res.ETag;
   }
 
   async listKeys(subPrefix: string): Promise<string[]> {
@@ -209,7 +211,7 @@ export class LogStore {
   async tryAcquireLease(
     mine: Lease,
     maxAttempts = 3,
-  ): Promise<{ won: true } | { won: false; held: Lease }> {
+  ): Promise<{ won: true; etag: string | undefined } | { won: false; held: Lease | null }> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const current = await this.getJson<Lease>(this.leaseKey());
 
@@ -217,8 +219,8 @@ export class LogStore {
         // No lease object at all: a cold bucket, or a graceful hand-off that
         // deleted it. Create-only, so a peer racing us here loses.
         try {
-          await this.putJson(this.leaseKey(), mine, { ifNoneMatch: true });
-          return { won: true };
+          const etag = await this.putJson(this.leaseKey(), mine, { ifNoneMatch: true });
+          return { won: true, etag };
         } catch (err) {
           if (!isPreconditionFailed(err)) throw err;
           continue; // someone created it first — re-read and reconsider
@@ -231,25 +233,47 @@ export class LogStore {
 
       // Expired. If-Match keeps two waiting followers from both taking over.
       try {
-        await this.putJson(this.leaseKey(), mine, { ifMatch: current.etag });
-        return { won: true };
+        const etag = await this.putJson(this.leaseKey(), mine, { ifMatch: current.etag });
+        return { won: true, etag };
       } catch (err) {
         if (!isPreconditionFailed(err)) throw err;
-        return { won: false, held: current.value };
+        continue; // someone else replaced it first — re-read to learn who won
       }
     }
 
     // Contended past the attempt budget. Reporting a loss is the safe answer:
-    // the caller stays a follower and tries again on its next poll.
+    // the caller stays a follower and tries again on its next poll. `held` is
+    // whatever the lease says right now — possibly nothing at all, which the
+    // caller treats as "no known leader" rather than pointing at itself.
     const last = await this.getJson<Lease>(this.leaseKey());
-    return last === null ? { won: false, held: mine } : { won: false, held: last.value };
+    return { won: false, held: last?.value ?? null };
   }
 
-  async renewLease(mine: Lease): Promise<void> {
-    await this.putJson(this.leaseKey(), mine);
+  async readLease(): Promise<{ lease: Lease; etag: string | undefined } | null> {
+    const res = await this.getJson<Lease>(this.leaseKey());
+    return res === null ? null : { lease: res.value, etag: res.etag };
   }
 
-  async releaseLease(): Promise<void> {
+  /**
+   * Renew conditionally on the etag of the lease this node last wrote. A stale
+   * leader waking from a long pause must NOT overwrite the lease a peer took
+   * over in the meantime — an unconditional PUT here would flap leadership back
+   * to a node whose state is arbitrarily far behind. A 412 means the lease is no
+   * longer ours; the engine treats that as a demotion.
+   */
+  async renewLease(mine: Lease, etag: string): Promise<string | undefined> {
+    return this.putJson(this.leaseKey(), mine, { ifMatch: etag });
+  }
+
+  /**
+   * Delete the lease only if it is still ours. S3 has no conditional DELETE, so
+   * this is read-then-delete: the residual race is a peer replacing the lease
+   * between the two calls, which costs one extra election round — churn, not a
+   * safety problem, since the log's conditional write still fences the loser.
+   */
+  async releaseLease(writerId: string): Promise<void> {
+    const current = await this.getJson<Lease>(this.leaseKey());
+    if (current?.value.writerId !== writerId) return;
     await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: this.leaseKey() }));
   }
 }
