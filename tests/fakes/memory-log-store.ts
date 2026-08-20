@@ -22,6 +22,16 @@ export class MemoryLogStore {
   fenceNextAppend = false;
 
   /**
+   * Set to make the next append throw — what LogStore.append does when six
+   * attempts still cannot determine whether the write landed. The engine must
+   * treat that as fatal rather than guess.
+   */
+  throwNextAppend = false;
+
+  /** Set to make the next readLease throw once — a transient S3 error. */
+  throwNextReadLease = false;
+
+  /**
    * Seqs that LIST still reports but GET cannot find — what a reader sees when
    * compaction prunes a key between its LIST and its GET.
    */
@@ -29,6 +39,10 @@ export class MemoryLogStore {
 
   async append(entry: LogEntry): Promise<'committed' | 'fenced'> {
     this.appendCalls++;
+    if (this.throwNextAppend) {
+      this.throwNextAppend = false;
+      throw new Error(`commit outcome for seq ${entry.seq} is still unknown`);
+    }
     if (this.fenceNextAppend) {
       this.fenceNextAppend = false;
       this.log.set(entry.seq, { ...entry, batchId: 'someone-elses-batch', writerId: 'other' });
@@ -74,6 +88,10 @@ export class MemoryLogStore {
   }
 
   async readLease(): Promise<{ lease: Lease; etag: string | undefined } | null> {
+    if (this.throwNextReadLease) {
+      this.throwNextReadLease = false;
+      throw new Error('transient S3 error reading the lease');
+    }
     return this.lease === null ? null : { lease: this.lease, etag: this.leaseEtag };
   }
 

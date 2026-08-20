@@ -142,7 +142,10 @@ const denied = await post(
   player,
   'seed-denied-0001',
 );
-check(denied.status === 403 || denied.status === 401, `a player token cannot seed (${denied.status})`);
+check(
+  denied.status === 403 || denied.status === 401,
+  `a player token cannot seed (${denied.status})`,
+);
 
 const statusDenied = await get(A_PORT, '/v1/escapement/admin/engine', player);
 check(
@@ -196,12 +199,16 @@ check(
 // A follower answers from its own state, which trails the leader by up to
 // FOLLOW_POLL_MS. That lag is the design, not a defect — reads never touch S3 —
 // so the property worth asserting is that it converges.
-const immediate = await get(B_PORT, `/v1/escapement/pools/${POOL}`, readToken).then((r) => r.json());
+const immediate = await get(B_PORT, `/v1/escapement/pools/${POOL}`, readToken).then((r) =>
+  r.json(),
+);
 const convergeDeadline = Date.now() + 5000;
 let followerStats = immediate;
 while (followerStats.claimed !== 400 && Date.now() < convergeDeadline) {
   await sleep(150);
-  followerStats = await get(B_PORT, `/v1/escapement/pools/${POOL}`, readToken).then((r) => r.json());
+  followerStats = await get(B_PORT, `/v1/escapement/pools/${POOL}`, readToken).then((r) =>
+    r.json(),
+  );
 }
 check(
   followerStats.claimed === 400 && followerStats.remaining === CODES.length - 400,
@@ -214,6 +221,51 @@ check(
   (immediate.claimed ?? 0) <= followerStats.claimed,
   'follower reads are served locally and lag rather than blocking on the leader',
 );
+
+// ---- idempotency keys are scoped per caller and per machine ---------------
+// The engine stores keys as {app}:{userId}:{machine}:{clientKey}, so a key is
+// only a replay when the SAME caller retries the SAME kind of operation.
+// Without the scoping, client B reusing (or guessing) client A's key would be
+// handed A's stored result — learning A's code, and silently never running its
+// own mutation. Only the full HTTP stack can test this: the scope is derived
+// from the verified JWT, which the engine-level unit tests never see.
+console.log('\n--- idempotency scoping: same key, different callers/machines ---');
+{
+  const alice = await playerToken('scope-alice');
+  const bob = await playerToken('scope-bob');
+  const sharedKey = 'shared-client-key-0001';
+  const asAlice = await post(
+    A_PORT,
+    `/v1/escapement/pools/${POOL}/claims`,
+    {},
+    alice,
+    sharedKey,
+  ).then((r) => r.json());
+  const asBob = await post(A_PORT, `/v1/escapement/pools/${POOL}/claims`, {}, bob, sharedKey).then(
+    (r) => r.json(),
+  );
+  check(
+    typeof asAlice.code === 'string' &&
+      typeof asBob.code === 'string' &&
+      asAlice.code !== asBob.code,
+    `one client key, two players, two distinct codes (${asAlice.code} vs ${asBob.code})`,
+  );
+  issued.set(asAlice.code, true);
+  issued.set(asBob.code, true);
+
+  // And the same caller replaying their own key still gets their own result.
+  const aliceAgain = await post(
+    A_PORT,
+    `/v1/escapement/pools/${POOL}/claims`,
+    {},
+    alice,
+    sharedKey,
+  ).then((r) => r.json());
+  check(
+    aliceAgain.code === asAlice.code,
+    `the same caller's retry still replays (${aliceAgain.code} === ${asAlice.code})`,
+  );
+}
 
 // ---- what an idle cluster costs ------------------------------------------
 // Not a behaviour check — a bill check. A follower polls forever, so anything it
@@ -232,21 +284,22 @@ const idle = {
 const idleSeconds = 3;
 // Only the leader should write while idle, renewing its lease every TTL/3.
 const maxRenewals = Math.ceil((idleSeconds * 1000) / (4000 / 3)) + 1;
-check(
-  idle.list === 0,
-  `no LIST while idle — the log head is found by GET (saw ${idle.list})`,
-);
+check(idle.list === 0, `no LIST while idle — the log head is found by GET (saw ${idle.list})`);
 check(
   idle.put <= maxRenewals,
   `writes while idle are lease renewals only (saw ${idle.put}, allow ${maxRenewals})`,
 );
-console.log(
-  `    ${idleSeconds}s idle → ${idle.get} GET, ${idle.put} PUT, ${idle.list} LIST`,
-);
+console.log(`    ${idleSeconds}s idle → ${idle.get} GET, ${idle.put} PUT, ${idle.list} LIST`);
 
 // ---- quota machine shares the same engine --------------------------------
 console.log('\n--- second state machine over the same log ---');
-await post(A_PORT, '/v1/escapement/admin/quotas/daily', { limit: 3 }, ADMIN_TOKEN, 'quota-def-0001');
+await post(
+  A_PORT,
+  '/v1/escapement/admin/quotas/daily',
+  { limit: 3 },
+  ADMIN_TOKEN,
+  'quota-def-0001',
+);
 const consumes = [];
 let rejectedBody = null;
 for (let i = 0; i < 4; i++) {
@@ -287,7 +340,9 @@ await post(
   'quota-def-0002',
 );
 await post(A_PORT, '/v1/escapement/quotas/per-player/consume', {}, player, 'quota-key-ps-1');
-const asPlayer = await get(A_PORT, '/v1/escapement/quotas/per-player', player).then((r) => r.json());
+const asPlayer = await get(A_PORT, '/v1/escapement/quotas/per-player', player).then((r) =>
+  r.json(),
+);
 check(
   asPlayer.used === 1 && asPlayer.remaining === 1 && asPlayer.limit === 2,
   `per-subject read scopes to the caller: used=${asPlayer.used} remaining=${asPlayer.remaining}`,
@@ -326,16 +381,21 @@ for (const r of after) {
   if (issued.has(r.code)) postDupes++;
   issued.set(r.code, true);
 }
+// 400 concurrent + 2 from the scoping section + 200 post-failover.
+const EXPECTED_ISSUED = 602;
 check(postErrs === 0, `all post-failover claims succeeded (errors=${postErrs})`);
 check(postDupes === 0, `no code reissued across the leadership change (dupes=${postDupes})`);
-check(issued.size === 600, `600 distinct codes total (got ${issued.size})`);
+check(
+  issued.size === EXPECTED_ISSUED,
+  `${EXPECTED_ISSUED} distinct codes total (got ${issued.size})`,
+);
 
 const finalStats = await get(survivorPort, `/v1/escapement/pools/${POOL}`, readToken).then((r) =>
   r.json(),
 );
 check(
-  finalStats.remaining === CODES.length - 600,
-  `pool accounting exact: remaining=${finalStats.remaining}, expected=${CODES.length - 600}`,
+  finalStats.remaining === CODES.length - EXPECTED_ISSUED,
+  `pool accounting exact: remaining=${finalStats.remaining}, expected=${CODES.length - EXPECTED_ISSUED}`,
 );
 
 // ---- graceful stop hands the lease over immediately ----------------------

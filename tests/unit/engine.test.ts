@@ -617,4 +617,314 @@ describe('Engine', () => {
     );
     assert.equal(fatals.length, 1);
   });
+  // -- batching across machines and callers -----------------------------------
+
+  it('settles a mixed multi-machine batch per command, in one S3 write', async () => {
+    // One batch carrying four commands across two machines, where each machine
+    // both commits and rejects. This is the shape production traffic actually
+    // has — many callers, several machines, one group commit — and the property
+    // that matters is that outcomes stay per-command: one caller's rejection is
+    // decided against the batch's provisional state and delivered as such,
+    // while the whole thing still costs exactly one append.
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store);
+    await engine.start();
+    await seed(engine, ['ONLY']); // pool has one code
+    await engine.submit({
+      machine: 'quota',
+      key: 'define-mixed',
+      payload: { type: 'define', quota: 'q', limit: 1, perSubject: false },
+    });
+
+    const before = store.appendCalls;
+    const settled = await Promise.allSettled([
+      claim(engine, 'pool-wins'),
+      claim(engine, 'pool-loses'),
+      engine.submit({
+        machine: 'quota',
+        key: 'quota-wins',
+        payload: { type: 'consume', quota: 'q', subject: 's1', amount: 1 },
+      }),
+      engine.submit({
+        machine: 'quota',
+        key: 'quota-loses',
+        payload: { type: 'consume', quota: 'q', subject: 's2', amount: 1 },
+      }),
+    ]);
+
+    assert.equal(settled[0].status, 'fulfilled', 'first pool claim got the code');
+    assert.equal(settled[2].status, 'fulfilled', 'first quota consume fit the ceiling');
+    assert.equal(settled[1].status, 'rejected', 'second pool claim was refused');
+    assert.match(String(settled[1].reason), /no unclaimed codes/);
+    assert.equal(settled[3].status, 'rejected', 'second quota consume was refused');
+    assert.match(String(settled[3].reason), /would be exceeded/);
+
+    assert.equal(store.appendCalls - before, 1, 'four commands, two machines, one S3 write');
+    const lastEntry = [...store.log.values()].pop()!;
+    assert.deepEqual(
+      lastEntry.commits.map((c) => c.machine).sort(),
+      ['pool', 'quota'],
+      'both machines committed into the same log entry',
+    );
+    await engine.shutdown(100);
+  });
+
+  it('a machine whose decide() throws fails only its own command', async () => {
+    // decide() throwing is a machine bug, but the engine promises it cannot
+    // take the batch down: the broken command gets a 500 and everything else
+    // in the batch commits normally. Without this isolation one bad machine
+    // would poison every concurrent caller sharing its 50ms window.
+    const broken = {
+      name: 'broken',
+      init: (): Record<string, never> => ({}),
+      decide: (): never => {
+        throw new Error('machine bug');
+      },
+      apply: (s: Record<string, never>): Record<string, never> => s,
+      snapshot: (): Json => ({}),
+      restore: (): Record<string, never> => ({}),
+    };
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store, { machines: [poolMachine, broken] });
+    await engine.start();
+    await seed(engine, ['A']);
+
+    const settled = await Promise.allSettled([
+      engine.submit({ machine: 'broken', key: 'boom', payload: {} }),
+      claim(engine, 'healthy'),
+    ]);
+    assert.equal(settled[0].status, 'rejected');
+    assert.match(String(settled[0].reason), /failed to handle/);
+    assert.equal(settled[1].status, 'fulfilled', 'the healthy command still committed');
+    assert.equal(engine.role, 'leader', 'a machine bug is not a reason to stop leading');
+    await engine.shutdown(100);
+  });
+
+  it("withholds an 'immediate' answer decided against provisional state on a fence", async () => {
+    // An identical quota redefinition normally answers without an S3 write. But
+    // when the ORIGINAL definition is a provisional commit in the same batch,
+    // the "identical" comparison read state that may never become durable — so
+    // if the batch fences, the immediate answer must be withheld too, exactly
+    // like the rejections. Otherwise a caller is told "already defined" about
+    // a definition that never happened.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+
+    store.fenceNextAppend = true;
+    const define = (key: string): Promise<Json> =>
+      engine.submit({
+        machine: 'quota',
+        key,
+        payload: { type: 'define', quota: 'fresh', limit: 5, perSubject: false },
+      });
+    const settled = await Promise.allSettled([define('d1'), define('d2')]);
+    assert.ok(
+      settled.every((s) => s.status === 'rejected'),
+      'neither the commit nor its in-batch echo was answered',
+    );
+    for (const s of settled) {
+      assert.match(String(s.reason), /fenced/i);
+    }
+    assert.equal(fatals.length, 1);
+  });
+
+  it('splits a burst across maxBatch-sized commits without issuing duplicates', async () => {
+    // maxBatch bounds the log-entry size, so a burst larger than it rides
+    // several appends. The invariants must hold ACROSS the split, not just
+    // within one batch: every claimant a distinct code, and exactly
+    // ceil(claims / maxBatch) writes.
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store, { maxBatch: 25, batchWindowMs: 1 });
+    await engine.start();
+    await seed(
+      engine,
+      Array.from({ length: 100 }, (_, i) => `C${i}`),
+    );
+
+    const before = store.appendCalls;
+    const results = await Promise.all(
+      Array.from({ length: 100 }, (_, i) => claim(engine, `burst-${i}`)),
+    );
+    const codes = new Set(results.map((r) => (r as { code: string }).code));
+    assert.equal(codes.size, 100, 'no duplicate across batch boundaries');
+    assert.equal(store.appendCalls - before, 4, '100 claims over maxBatch=25 is four writes');
+    await engine.shutdown(100);
+  });
+
+  // -- error paths -------------------------------------------------------------
+
+  it('fails closed when a commit outcome cannot be determined', async () => {
+    // LogStore.append throws when, after all its retries, it still cannot tell
+    // whether the write landed. Resolving would risk double-issuing; rejecting
+    // with a definitive error would deny a commit that may exist. The only safe
+    // answer is a retryable failure for every caller in the batch and an exit —
+    // the rebuild reads the log and learns the truth.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A', 'B']);
+
+    store.throwNextAppend = true;
+    const settled = await Promise.allSettled([claim(engine, 'u1'), claim(engine, 'u2')]);
+    assert.ok(settled.every((s) => s.status === 'rejected'));
+    assert.equal(fatals.length, 1);
+    assert.match(fatals[0]!, /irrecoverably/);
+    assert.notEqual(engine.role, 'leader');
+  });
+
+  it('rides out a transient error in the post-commit leadership check', async () => {
+    // The leadership confirmation retries a few times before failing closed.
+    // A single S3 blip on that GET must not turn a perfectly good commit into
+    // an exit — only a persistent inability to answer does.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A']);
+
+    store.throwNextReadLease = true;
+    const result = (await claim(engine, 'blip')) as { code: string };
+    assert.equal(result.code, 'A', 'the commit was answered despite the blip');
+    assert.equal(fatals.length, 0);
+    assert.equal(engine.role, 'leader');
+    await engine.shutdown(100);
+  });
+
+  it('a commit orphaned by a lost lease is still honored after the rebuild', async () => {
+    // The post-commit leadership check rejects callers with a retryable 503
+    // even though their write IS durable. That is only safe if a retry against
+    // the next incarnation replays the committed result instead of issuing a
+    // second code — this test walks that full recovery path.
+    const store = new MemoryLogStore();
+    const fatals: string[] = [];
+    const engine = buildEngine(store, { onFatal: (reason) => fatals.push(reason) });
+    await engine.start();
+    await seed(engine, ['A', 'B']); // seq 1
+
+    // A peer takes the lease while the claim's append is in flight; the claim
+    // commits at seq 2 but must not be answered.
+    store.takeLease({
+      writerId: 'B',
+      endpoint: 'http://b:3000',
+      expiresAt: Date.now() - 1, // already expired, so the next node can win
+      seq: 1,
+    });
+    await assert.rejects(() => claim(engine, 'orphaned'), /Leadership/);
+    assert.equal(fatals.length, 1);
+    assert.ok(store.log.has(2), 'the claim IS durable in the log');
+
+    // The restarted node replays seq 2, so the caller's retry with the same
+    // idempotency key gets the code that committed — not a fresh one.
+    const revived = buildEngine(store);
+    await revived.start();
+    assert.equal(revived.role, 'leader');
+    const retried = (await claim(revived, 'orphaned')) as { code: string };
+    const other = (await claim(revived, 'someone-else')) as { code: string };
+    assert.notEqual(retried.code, other.code);
+    assert.deepEqual(
+      [retried.code, other.code].sort(),
+      ['A', 'B'],
+      'exactly the two seeded codes exist: nothing double-issued, nothing lost',
+    );
+    await revived.shutdown(100);
+  });
+
+  it('a retry after idempotency eviction burns a new code — the documented bound', async () => {
+    // IDEMPOTENCY_LIMIT is the window in which a client retry is safe; this
+    // test pins that boundary so a change to the eviction policy is a
+    // deliberate decision, not an accident. Outside the window a retry is a
+    // new command, and a second code is the expected (documented) cost.
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store, { idempotencyLimit: 1 });
+    await engine.start();
+    await seed(engine, ['A', 'B', 'C']);
+
+    const first = (await claim(engine, 'evicted')) as { code: string };
+    await claim(engine, 'filler'); // evicts 'evicted' from the 1-entry window
+    const retry = (await claim(engine, 'evicted')) as { code: string };
+    assert.notEqual(retry.code, first.code, 'outside the window, a retry is a new claim');
+
+    const remaining = engine.query<Map<string, { free: { size: number } }>, number>(
+      'pool',
+      (state) => state.get('p')!.free.size,
+    );
+    assert.equal(remaining, 0, 'three claims spent all three codes');
+    await engine.shutdown(100);
+  });
+
+  it('rejects a command for an unregistered machine without touching the queue', async () => {
+    // A typo'd machine name must fail fast at submit — not sit in a batch, and
+    // certainly not reach the log, where an unknown name would poison every
+    // future replay of this history.
+    const store = new MemoryLogStore();
+    const engine = buildEngine(store);
+    await engine.start();
+    const before = store.appendCalls;
+    await assert.rejects(
+      () => engine.submit({ machine: 'nope', key: 'k', payload: {} }),
+      /No state machine named 'nope'/,
+    );
+    assert.equal(store.appendCalls, before, 'nothing was written');
+    await engine.shutdown(100);
+  });
+
+  // -- election under a shared store --------------------------------------------
+
+  it('a follower promotes itself once the lease expires', async () => {
+    // The unit-level version of hard-kill failover: the leader is simply gone
+    // (its lease ages out), and the follower's poll must take over via the
+    // expired-lease CAS rather than waiting for anything else.
+    const store = new MemoryLogStore();
+    store.lease = {
+      writerId: 'dead-leader',
+      endpoint: 'http://dead:3000',
+      expiresAt: Date.now() + 150,
+      seq: 0,
+    };
+    const engine = buildEngine(store, { followPollMs: 25 });
+    await engine.start();
+    assert.equal(engine.role, 'follower', 'the lease was live at boot');
+
+    await waitFor(() => engine.role === 'leader');
+    assert.equal(store.lease?.writerId, engine.nodeId, 'the lease now names this node');
+    await engine.shutdown(100);
+  });
+
+  it('a follower tails the leader, then takes a graceful hand-off without re-issuing', async () => {
+    // Two engines over one store — the unit-level version of the failover
+    // suite's happy path. It pins three properties at once: a follower's state
+    // converges by replaying the log (reads work there), a graceful shutdown
+    // hands the lease over rather than waiting out the TTL, and the successor
+    // issues only codes the first leader never touched.
+    const store = new MemoryLogStore();
+    const leader = buildEngine(store);
+    await leader.start();
+    await seed(leader, ['A', 'B', 'C', 'D']);
+
+    const follower = buildEngine(store, { followPollMs: 20 });
+    await follower.start();
+    assert.equal(follower.role, 'follower');
+
+    const taken = new Set<string>();
+    taken.add(((await claim(leader, 'lk1')) as { code: string }).code);
+    taken.add(((await claim(leader, 'lk2')) as { code: string }).code);
+
+    await waitFor(() => follower.sequence === leader.sequence);
+    const seen = follower.query<Map<string, { free: { size: number } }>, number>(
+      'pool',
+      (state) => state.get('p')!.free.size,
+    );
+    assert.equal(seen, 2, 'the follower converged by tailing the log');
+
+    await leader.shutdown(100); // releases the lease — no TTL wait
+    await waitFor(() => follower.role === 'leader');
+
+    taken.add(((await claim(follower, 'fk1')) as { code: string }).code);
+    taken.add(((await claim(follower, 'fk2')) as { code: string }).code);
+    assert.equal(taken.size, 4, 'no code was issued twice across the hand-off');
+    await follower.shutdown(100);
+  });
 });
