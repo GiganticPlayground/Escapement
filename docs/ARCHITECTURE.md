@@ -130,6 +130,18 @@ Forwarded requests carry `x-escapement-forwarded-by`. A node that receives a
 forwarded request but is not the leader returns `503` rather than forwarding
 again, so a stale view cannot produce a loop. When no leader is known — or the
 lease names this node — the caller gets `503 NO_LEADER` with a `retryAfterMs`.
+The forward itself times out after `LEASE_TTL_MS`: that is the failover horizon,
+so if the leader is stuck a replacement exists within one TTL, and waiting
+longer only pins the client — it also keeps the 503's `retryAfterMs` honest.
+
+`dispatch()` also scopes the idempotency key before the engine sees it: the
+stored key is `{app}:{userId}:{machine}:{clientKey}`, never the raw header
+alone. A raw key is a single global namespace — one caller reusing (or guessing)
+another's key would be handed the other caller's stored result, and a key first
+used on a pool claim would answer a quota consume. A follower forwards the raw
+header and the leader re-derives the same scope from the forwarded credential;
+client-visible semantics are unchanged: retry the same operation with the same
+key and the same credential.
 
 Reads never leave the process: the controller calls `engine.query()`, which runs a
 pure function over in-memory state. This is why reads work on followers, and why
@@ -195,8 +207,12 @@ non-empty at the top of the loop.
 Idempotency is the engine's job, not the machine's. Machines never see an
 idempotency key.
 
-- A repeated key replays the original result without touching S3.
-- Two commands sharing a key **inside one batch** collapse to one.
+- Keys arrive already scoped to the caller and machine by `dispatch()` — see §3.
+- A repeated key replays the original result without touching S3. This is the
+  **only** answer given before durability — the record it replays already
+  committed.
+- Two commands sharing a key **inside one batch** collapse to one, settled only
+  once the batch is durable.
 - Records are kept in memory and written into every snapshot, so a retry survives
   a restart.
 - The store is insertion-ordered and bounded by `IDEMPOTENCY_LIMIT`, evicting
@@ -239,11 +255,30 @@ The alternatives are both worse: returning the codes to the pool risks issuing
 them twice, and rejecting the callers risks losing codes that actually committed.
 Exiting rebuilds from the log, which is the only thing that knows.
 
+**Every committed batch is followed by one leadership confirmation.**
+`If-None-Match` only fences a slot that still exists, and compaction deletes log
+keys. A writer paused long enough for a successor to commit past its sequence
+*and* prune it would find the slot free, re-create it invisibly — recovery
+starts at a newer snapshot and never reads it — and double-issue. So after the
+PUT lands, the leader GETs the lease (`confirmLeadership`) and refuses to answer
+its callers unless it still holds it. A commit therefore costs one PUT plus one
+GET — roughly an 8% add on the PUT the batch already paid for. The confirmation
+fails closed: the commit *is* durable, so callers rejected here retry against
+the next leader and are answered from the idempotency record, never re-issued.
+
+**Nothing decided in a batch is answered before the batch is durable.** In-batch
+idempotency-key collisions, immediate results and machine rejections may all
+have been decided against provisional state an earlier command in the same batch
+changed, so all of them settle only after the append lands. A fenced batch turns
+every one of them into a retryable 503, because the state they were decided
+against never committed. Only replays of already-durable idempotency records are
+answered before the PUT.
+
 ---
 
 ## 6. Storage, recovery and compaction
 
-![Where compaction leaves the log, and how a node rebuilds from it without ever listing a prefix.](diagrams/storage-recovery.svg)
+![Where compaction leaves the log, and how a node rebuilds from it without ever listing the log — one LIST of the snapshot prefix at boot is the only listing recovery does.](diagrams/storage-recovery.svg)
 
 ### Key layout
 
@@ -262,9 +297,11 @@ printed once at startup.
 
 ### Recovery
 
-Load the newest snapshot, then walk the log forward one entry at a time —
-`seq + 1`, `seq + 2` — stopping at the first key that is not there. **Recovery
-does not list the log**, and neither does a follower's tail.
+Load the newest snapshot — found by one LIST of the `snapshot/` prefix at boot
+(`readLatestSnapshot`), the only listing recovery does — then walk the log
+forward one entry at a time — `seq + 1`, `seq + 2` — stopping at the first key
+that is not there. **Recovery never lists the log**, and neither does a
+follower's tail.
 
 That is partly a cost decision: sequence numbers are dense, so a LIST reveals
 nothing a GET would not, and S3 prices LIST at the write rate. It is also strictly
@@ -287,11 +324,14 @@ in between leaves only redundant entries that replay harmlessly.
 
 Two rules keep compaction from destroying anything:
 
-**It keeps `PRUNE_RETAIN` entries behind the snapshot.** A reader may already hold
-a key it has not fetched yet. Pruning to the head lets a delete land between a
-reader's GET and its decision, and the retained margin makes that race
-unreachable in practice while the fail-closed replay makes it loud if it ever
-happens.
+**It keeps `PRUNE_RETAIN` entries behind the snapshot.** A follower GET-walks the
+log one sequence at a time, so pruning to the head lets a delete land on the very
+entry a lagging follower is about to walk into. The retained margin keeps
+anything a follower could plausibly still need fetchable — it must comfortably
+exceed the commits a follower can miss in one `FOLLOW_POLL_MS` — and a follower
+that falls behind the horizon anyway detects it via the lease's committed-`seq`
+hint and exits to rebuild. The margin makes the race rare; the exit makes it
+loud.
 
 **It refuses to run while history names a machine this build does not register.**
 A snapshot is built from the registry, so an older binary would otherwise write a
@@ -321,9 +361,15 @@ they are just no longer how the question is asked.
 - Expired lease → take it with `If-Match: <etag>`, so two waiting followers cannot
   both win.
 
-The leader renews every `LEASE_TTL_MS / 3`. A failed renewal is logged and
-swallowed on purpose: the log's conditional write still fences, so a transient S3
-blip should not tear down a healthy leader.
+The leader renews every `max(1000, LEASE_TTL_MS / 3)` milliseconds — the 1 s
+floor matters at the small TTLs quoted below, where a third of the TTL would be
+a sub-second heartbeat. Renewal is conditional, `If-Match` on the etag of the
+lease this node last wrote: a 412 means a peer replaced the lease while this
+node was paused or partitioned, so it is a stale leader with arbitrarily old
+state, and it exits to rejoin as a follower rather than stealing the lease back
+and serving stale reads. Any *other* renewal failure is logged and swallowed on
+purpose: the log's conditional write still fences, so a transient S3 blip should
+not tear down a healthy leader.
 
 **The lease is an optimisation, not the safety mechanism.** It stops two nodes
 wasting effort fighting over the writer role. If a follower promotes while the old
@@ -333,7 +379,11 @@ lease on the assumption that safety depends on it; tighten the commit path
 instead.
 
 Graceful shutdown drains in-flight commands and **deletes** the lease, so a
-standby takes over on its next poll rather than waiting out the TTL. Measured:
+standby takes over on its next poll rather than waiting out the TTL. The delete
+is verified: S3 has no conditional DELETE, so the node reads the lease back and
+deletes only if it is still its own — renewal stopped when draining began, so a
+drain that outlives the TTL may find a peer already holding the lease, and
+deleting *their* lease would force a second, avoidable election. Measured:
 ~300–500 ms graceful, ~3–4 s after a SIGKILL with a 4 s TTL.
 
 ---
@@ -391,7 +441,7 @@ Takes the next available code.
 
 | | |
 |---|---|
-| Body | `{ "by": "...", "metadata": {...} }` — both optional; `by` defaults to the token subject |
+| Body | `{ "by": "...", "metadata": {...} }` — both optional; `by` defaults to the token subject. `metadata` is bounded — at most 32 properties, flat string values up to 1024 chars — because it lives in memory and in every snapshot for as long as the claim does |
 | `200` | `{ "pool": "launch-codes", "code": "A", "by": "player-1", "claimedAt": "2026-08-20T12:00:00.000Z" }` |
 | `404` | no pool by that name |
 | `409` | `{ "message": "...", "code": "POOL_EXHAUSTED" }` — the pool exists and is empty |
@@ -515,7 +565,7 @@ a backstop. `subjects` is the count of distinct subjects with recorded usage.
 | Endpoint | Response |
 |---|---|
 | `GET /health` | `200 {"status":"ok","role":"leader"\|"follower",...}` once the node has a role; `503` while `starting` or draining. **A follower is healthy** — see §7. |
-| `GET /v1/escapement/engine` | `{ nodeId, role, seq, endpoint, leaderEndpoint?, queued, draining, machines[] }` — `seq` is the last committed log entry |
+| `GET /v1/escapement/admin/engine` | `{ nodeId, role, seq, endpoint, leaderEndpoint?, queued, draining, machines[] }` — `seq` is the last committed log entry. Admin-only, because it maps internal cluster topology |
 
 ## 9. Authentication and authorization
 
@@ -527,7 +577,12 @@ reject, the most informative failure is surfaced (`403` beats `401`, because
 
 Strategies come from a deployment config file (`ESCAPEMENT_CONFIG_PATH`, else
 `config/escapement.yaml`). With no file, one strategy is built from the `JWT_*`
-environment variables. Secrets need not live in the file: `${env:VAR}` and
+environment variables — and only then are `JWT_ISSUER`, `JWKS_URI` or
+`JWT_SECRET` required; when a file supplies the strategies, none of the group is
+read, so none is demanded. An audience is strongly recommended either way:
+without one, verification checks only signature and issuer, so a token the same
+issuer minted for a *different* service is accepted here too. Each JWT strategy
+that omits an audience logs a warning at startup. Secrets need not live in the file: `${env:VAR}` and
 `${file:PATH}` placeholders resolve at startup, and an unset variable or
 unreadable file is a hard failure, so such a file is safe to commit beside a
 deployment.
@@ -550,6 +605,7 @@ Cross-field rules are enforced there too — for example `LEASE_TTL_MS` must exc
 
 | Variable | Default | Notes |
 |---|---|---|
+| `AWS_REGION` | — | required |
 | `ESCAPEMENT_S3_BUCKET` | — | required |
 | `ESCAPEMENT_ENV` | — | required; becomes a key segment |
 | `ESCAPEMENT_KEY_PREFIX` | `escapement` | becomes a key segment |
@@ -561,7 +617,9 @@ Cross-field rules are enforced there too — for example `LEASE_TTL_MS` must exc
 | `SNAPSHOT_EVERY` | `1000` | commits between snapshots |
 | `PRUNE_RETAIN` | `200` | entries kept behind a snapshot for in-flight readers |
 | `IDEMPOTENCY_LIMIT` | `50000` | window in which a retry is safe |
-| `ESCAPEMENT_CONFIG_PATH` | — | auth strategy file |
+| `DRAIN_TIMEOUT_MS` | `10000` | time allowed for in-flight commits to drain on shutdown |
+| `SHUTDOWN_TIMEOUT_MS` | `30000` | hard ceiling on the whole shutdown sequence |
+| `ESCAPEMENT_CONFIG_PATH` | — | auth strategy file; when present, the `JWT_*` group is not required |
 | `ESCAPEMENT_S3_ENDPOINT` | — | point at MinIO or a stub for local runs |
 
 **`BATCH_WINDOW_MS` and `PRUNE_RETAIN` are coupled.** The retained margin is
@@ -583,16 +641,20 @@ margin needs raising to match.
 |---|---|
 | Commit succeeds | callers answered; only now is anything true |
 | Commit returns 412, `batchId` matches | the write landed; treated as committed |
-| Commit returns 412, `batchId` differs | fenced → reject callers, exit |
+| Commit returns 412, `batchId` differs | fenced → callers get retryable 503s, exit |
+| Commit lands but the lease is another node's | callers get retryable 503s, exit; retries replay from the idempotency record |
 | Commit outcome unknown after retries | exit; the log is the only source of truth |
-| Replay finds a listed entry missing | exit and rebuild |
-| 404 while the lease reports a higher seq | behind the prune horizon → exit and rebuild |
+| GET-walk hits a 404 while the lease reports a higher seq | behind the prune horizon → exit and rebuild |
 | Snapshot or prune fails | logged and ignored; the log is still complete |
-| Lease renewal fails | logged and ignored; the commit path still fences |
+| Lease renewal 412s | a peer holds the lease → exit and rejoin as a follower |
+| Lease renewal fails otherwise | logged and ignored; the commit path still fences |
 | Leader killed | standby promotes within the lease TTL |
 | Leader stopped gracefully | lease released; standby promotes in ~400 ms |
 | History names an unregistered machine | compaction stands down; log grows; nothing lost |
 | Machine `apply` throws during replay | leader fails to boot; a follower stalls silently |
+
+`5xx` responses are deliberately generic — internal error detail goes to the
+logs only, never to the caller.
 
 ---
 
@@ -632,17 +694,19 @@ visible stall.
 ### Cost
 
 S3 request pricing dominates, and it is driven by polling rather than by traffic —
-each batch is a single PUT no matter how many claims ride it. Failed conditional
-requests are billed at normal rates, and LIST is billed at the PUT rate, which is
-why neither appears on the follower's steady-state path.
+each batch is a single PUT plus the post-commit lease GET (an ~8% add) no matter
+how many claims ride it. Failed conditional requests are billed at normal rates,
+and LIST is billed at the PUT rate, which is why neither appears on the
+follower's steady-state path.
 
 Measured on the stub against two live nodes, idle: **3 s → 14 GET, 2 PUT, 0 LIST**
 — the writes being lease renewals. At US-East-1 list prices that is roughly $2/month
 per follower plus ~$2.60/month for the leader's lease renewals.
 
 Storage is negligible by comparison: a few hundred small log objects, plus
-snapshots. Snapshots are never pruned, which is a growth vector in principle and
-pennies in practice.
+snapshots. Snapshots are never pruned by the service, which is a growth vector
+in principle and pennies in practice — an S3 lifecycle rule on the `snapshot/`
+prefix caps it (see the worked example below).
 
 ### A worked example: 10 million codes, 30 million claims
 
@@ -684,7 +748,10 @@ a 10M-code snapshot is on the order of **790 MB**. Nothing prunes them, so a mon
 of operation accumulates several terabytes — plausibly **$50-90 in the first month
 and rising every month after**, which overtakes the request bill. Retaining only
 the last few snapshots turns that back into pennies, and it is the single
-highest-value change at this scale.
+highest-value change at this scale. The interim mitigation needs no code: an S3
+lifecycle rule on `<prefix>/<env>/snapshot/` expiring objects older than a
+comfortable window is safe today, because only the newest snapshot is ever read
+and the log retains `PRUNE_RETAIN` entries behind it.
 
 **What actually breaks first is not cost.** Extrapolated to 10M codes: ~4.5 GB of
 heap on every node, and a synchronous snapshot taking on the order of two seconds
@@ -709,7 +776,17 @@ live and healthy, exactly one holding the lease.
 
 Peers address each other by Swarm task name on the overlay network
 (`ESCAPEMENT_ENDPOINT_HOST={{.Task.Name}}`). Auth config and AWS credentials
-arrive as Swarm secrets.
+arrive as Swarm secrets. CI publishes `:<git-tag>` on tags and `:latest-main`
+on `main`; the stack's `TAG` variable selects which, defaulting to
+`latest-main`.
+
+The service needs `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on
+`<prefix>/*`, plus `s3:ListBucket` — used only for snapshot discovery at boot
+and leader-side pruning. The bucket needs nothing beyond conditional-write
+support (standard S3; MinIO works). A fresh deployment needs only the bucket and
+the env vars: the log starts empty. Operational specifics — log lines worth
+alerting on, error codes, the snapshot lifecycle rule — live in the README's
+Operations section.
 
 A single instance is a legitimate deployment. It costs less and is simpler; what
 it gives up is failover and zero-downtime deploys. Note that with no standby the
@@ -737,11 +814,14 @@ regressing.
 The split matters. The global-symbol bug in §2 was invisible to the unit tests and
 caught only by running two real processes.
 
+Both suites gate the Docker image: the publish workflow runs `validate`, the
+unit suite and the failover suite before anything is built or pushed.
+
 ---
 
 ## 15. Extending it
 
-Adding a capability touches four files and never the engine:
+Adding a capability touches six files and never the engine:
 
 1. `src/machines/<name>.machine.ts` — the machine, plus pure read helpers.
 2. `src/machines/index.ts` — re-export.

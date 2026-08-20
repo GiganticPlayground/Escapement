@@ -1,8 +1,8 @@
 # Handoff
 
 Where the work stands, decisions whose reasoning is not visible in the code, and
-unclaimed open items. Architecture lives in `CLAUDE.md`, usage in `README.md`,
-and anything git history records belongs in neither.
+unclaimed open items. Architecture lives in `docs/ARCHITECTURE.md`, usage in
+`README.md`, and anything git history records belongs in neither.
 
 ## Status
 
@@ -11,19 +11,20 @@ auth via `token-weaver`, the engine (group commit, conditional-write log,
 snapshot/replay, lease-based leader election, follower tailing and forwarding),
 and two state machines (`pool`, `quota`).
 
-- `npm test` — 44 unit tests, green.
-- `npm run test:failover` — 23 black-box checks across two live processes, green.
+- `npm test` — 51 unit tests, green.
+- `npm run test:failover` — 24 black-box checks across two live processes, green.
   Covers election, follower forwarding, follower read convergence, quota
   enforcement across nodes and the shape of its refusal, per-subject quota
   scoping, the idle request mix, SIGKILL promotion inside the lease TTL, graceful
   hand-off in ~300–500ms, and no code reissued across a leadership change.
 - Docker image builds and runs: elects itself leader against a stub S3, serves
   `/health`, and refuses an unauthenticated request.
-- `.github/workflows/docker-publish.yml` builds and pushes to GHCR on `main` and
-  on tags, for `linux/amd64` and `linux/arm64`.
+- `.github/workflows/docker-publish.yml` builds and pushes to GHCR on `main`
+  (`:latest-main`) and on tags (`:<git-tag>`), for `linux/amd64` and
+  `linux/arm64`. The image is gated: `validate`, the unit suite and the failover
+  suite must all pass before anything is built or pushed.
 
-Not yet done: never run against real S3, no load test, and no CI workflow gating
-`validate`/`test` (only the image build runs in CI).
+Not yet done: never run against real S3, and no load test.
 
 ## Decisions worth knowing
 
@@ -52,12 +53,50 @@ alternative paths are both worse: returning the codes to the pool risks issuing
 them twice, and rejecting the callers risks losing codes that actually
 committed. Exiting rebuilds from the log, which is the only thing that knows.
 
+**Leadership is confirmed after every committed batch.** `If-None-Match` only
+fences a slot that still exists, and compaction deletes log keys — so a writer
+paused long enough for a successor to commit past its seq *and* prune it could
+re-create the slot invisibly and double-issue. `confirmLeadership` GETs the
+lease after the PUT lands and refuses to answer callers unless this node still
+holds it; a commit is one PUT plus one GET, roughly an 8% add. Failing closed
+here is safe: the commit is durable, so rejected callers retrying against the
+next leader are answered from the idempotency record, never re-issued.
+
+**Batch responses are deferred until durability.** In-batch idempotency-key
+collisions, immediate results and machine rejections may all have been decided
+against provisional state an earlier command in the same batch changed, so all
+of them settle only after the append lands — a fenced batch turns every one into
+a retryable 503. Only replays of already-durable idempotency records are
+answered before the PUT.
+
+**Idempotency keys are scoped.** The engine stores
+`{app}:{userId}:{machine}:{clientKey}` (`scopedKey` in
+`src/services/dispatch.ts`), never the raw header alone — a raw key is a single
+global namespace, so one caller reusing or guessing another's key would be
+handed the other caller's stored result, and a key first used on a pool claim
+would answer a quota consume. Client-visible semantics are unchanged: retry the
+same operation with the same key and the same credential.
+
 **The lease is not load-bearing for safety.** It only stops two nodes from
 wasting effort fighting over the writer role. Correctness comes from
 `If-None-Match: *` on the log entry, so a takeover that guesses wrong about
 liveness still cannot double-issue — the loser is fenced on its first commit and
 exits. Do not "harden" the lease on the assumption that safety depends on it;
 tighten the commit path instead.
+
+**Lease renewal is conditional; release is verified.** Renewal is `If-Match` on
+the etag the leader last wrote — a 412 means a peer took over, and the node
+exits to rejoin as a follower instead of stealing the lease back and serving
+arbitrarily stale reads (an unconditional renew was exactly how a resurrected
+leader used to re-advertise itself). Shutdown reads the lease and deletes only
+if it is still this node's — S3 has no conditional DELETE — so a drain that
+outlives the TTL no longer deletes the new leader's lease and forces a second,
+avoidable election.
+
+**The forwarder times out at `LEASE_TTL_MS`, not `SHUTDOWN_TIMEOUT_MS`.** The
+lease TTL is the failover horizon: if the leader is stuck, a replacement exists
+within one TTL, so waiting longer only pins the client — and it keeps the 503's
+`retryAfterMs` advice honest.
 
 **Followers report healthy.** The obvious design — standby fails its health check
 so the routing mesh skips it — crash-loops, because orchestrators restart
@@ -96,13 +135,15 @@ down to about $2. The conditional headers still do all the fencing; they are jus
 no longer how the question gets asked. `test:failover` asserts the idle
 request mix so neither habit comes back.
 
-**Replay never skips a hole.** A log entry that LIST reported but GET cannot find
-means compaction pruned it mid-read. Continuing past it would drop everything it
-committed and leave the node diverged with `seq` at the log head, so nothing
-downstream — not even the commit fence — could notice. It exits instead, and
-`PRUNE_RETAIN` keeps a margin behind each snapshot so the race should not arise
-in the first place. Two mechanisms for one bug is deliberate: the margin makes it
-rare, the exit makes it loud.
+**Replay never skips a hole.** The log is never listed — a follower GET-walks
+`seq + 1` until a 404 — so a hole shows up as a 404 while the lease's
+committed-`seq` hint says the log runs further: compaction pruned an entry this
+node still needed. Continuing past it would drop everything it committed and
+leave the node diverged with `seq` at the log head, so nothing downstream — not
+even the commit fence — could notice. It exits instead, and `PRUNE_RETAIN` keeps
+a margin behind each snapshot so a prune cannot delete the very entry a lagging
+follower is about to walk into. Two mechanisms for one bug is deliberate: the
+margin makes it rare, the exit makes it loud.
 
 **Compaction stands down when a machine is missing.** Dropping unregistered
 machines on boot is what makes a rollback possible, but a snapshot is built from
@@ -122,6 +163,24 @@ in-memory rollback path, this has to change with it.
 **Timestamps come from controllers, not machines.** Keeps `decide` pure and
 unit-testable, and puts the value in the event so replay reproduces the original
 rather than the replay-time clock.
+
+**Engine status is admin-only.** `GET /v1/escapement/engine` moved to
+`GET /v1/escapement/admin/engine`: it maps internal cluster topology (node ids,
+endpoints, the leader's address), which no player credential needs.
+
+**The `JWT_*` group is conditional.** When a config file supplies the auth
+strategies (`ESCAPEMENT_CONFIG_PATH`, or `config/escapement.yaml` when present),
+`JWT_ISSUER`/`JWKS_URI`/`JWT_SECRET` are not required — requiring them anyway
+was pure deployment friction. `JWT_AUDIENCE` is strongly recommended: without an
+audience, verification checks only signature and issuer, so tokens the same
+issuer minted for a different service are accepted here too; each JWT strategy
+that omits one logs a startup warning.
+
+**Request surfaces are tightened.** Bodies reject unknown fields
+(`additionalProperties: false`), `ClaimRequest.metadata` is bounded (32
+properties, flat string values ≤ 1024 chars — it lives in memory and in every
+snapshot for the life of the claim), and `5xx` responses are generic, with
+internal error detail going to the logs only.
 
 ## Open items
 
@@ -151,9 +210,6 @@ rather than the replay-time clock.
 - **Seeding writes one large object.** 100k codes is a few MB in a single log
   entry. S3 is fine with it, but a very large pool would be better chunked.
 - **No response validation.** `validateResponses` is off, matching Memcard.
-- **CI gate.** Only the image build runs in CI. `npm run validate && npm test` is
-  the gate worth adding; `test:failover` spawns processes and binds ports, so
-  decide deliberately whether CI should run it.
 - **Real-S3 verification.** There is no suite that drives a live AWS bucket. The
   conditional-write behaviour everything depends on is modelled by a stub, and a
   stub cannot prove AWS agrees. Worth a small harness that seeds a pool, claims

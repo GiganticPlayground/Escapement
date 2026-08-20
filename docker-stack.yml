@@ -15,7 +15,9 @@ version: '3.9'
 
 services:
   api:
-    image: ${REGISTRY:-ghcr.io/giganticplayground}/escapement:${TAG:-latest}
+    # CI publishes `:<git-tag>` on tags and `:latest-main` on main — there is no
+    # plain `:latest`. TAG selects which; the default tracks main.
+    image: ${REGISTRY:-ghcr.io/giganticplayground}/escapement:${TAG:-latest-main}
 
     environment:
       AWS_REGION: '${AWS_REGION:-us-east-1}'

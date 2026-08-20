@@ -62,7 +62,15 @@ handler.
   and a timeout identically: read the key back and compare `batchId`, which
   answers "did my write land?" and "have I been fenced?" in one GET.
 - `engine.ts` — group-commit loop, idempotency, lease-based role election,
-  follower tailing, snapshot/replay.
+  follower tailing, snapshot/replay. After every committed batch the leader GETs
+  the lease and refuses to answer callers unless it still holds it
+  (`confirmLeadership`) — `If-None-Match` only fences a slot that still exists,
+  and compaction deletes log keys, so a long-paused writer could otherwise
+  re-create a pruned slot invisibly. In-batch key collisions, immediate results
+  and rejections all settle only after the append lands; a fenced batch turns
+  them into retryable 503s. Idempotency keys are stored scoped
+  (`{app}:{userId}:{machine}:{clientKey}`, built in `src/services/dispatch.ts`)
+  so one caller cannot replay another's key or cross machines.
 
 **Reads are shaped by S3's price list.** `catchUp` walks `seq + 1` until a 404
 instead of listing the log, and `tryAcquireLease` GETs before it PUTs. Both are
@@ -72,11 +80,13 @@ replaced. Do not reintroduce a LIST on the follower path; `test:failover` fails
 if you do.
 
 **Compaction is conservative on purpose.** It keeps `PRUNE_RETAIN` log entries
-behind the snapshot so a reader's LIST/GET pair cannot straddle a delete, and it
+behind the snapshot so a prune cannot delete the very entry a lagging follower's
+GET-walk is about to fetch — a follower that falls behind the horizon anyway
+detects it via the lease's committed-`seq` hint and exits to rebuild — and it
 refuses to run at all while the log or snapshot names a machine this build does
 not register — otherwise an old binary snapshots that machine out of existence
-and prunes the log that recorded it. A replay that finds a listed entry missing
-exits rather than skipping it.
+and prunes the log that recorded it. A replay whose GET-walk 404s while the
+lease reports a higher seq exits and rebuilds rather than skipping the gap.
 
 **Failing closed is deliberate.** A fenced writer or an undeterminable commit
 calls `fatal()`, which exits. Returning codes to the pool risks double-issuing;
@@ -92,9 +102,14 @@ not by the unit tests.
 
 **Leader/follower.** One node holds `lease.json` and writes. Followers tail the
 log, serve reads from their own (slightly stale) state, and forward mutations via
-`src/services/forwarder.ts`. Followers report **healthy** — an unhealthy standby
-would be restarted in a loop by the orchestrator. The lease is an optimisation;
-safety comes from the log's conditional write.
+`src/services/forwarder.ts` (timeout: `LEASE_TTL_MS`, the failover horizon).
+Followers report **healthy** — an unhealthy standby would be restarted in a loop
+by the orchestrator. The lease is an optimisation; safety comes from the log's
+conditional write. Renewal is `If-Match` on the etag the leader last wrote — a
+412 means a peer took over, and the node exits rather than stealing the lease
+back and serving stale reads. Shutdown releases the lease only after reading it
+back and confirming it is still this node's (S3 has no conditional DELETE), so a
+drain that outlives the TTL cannot delete the new leader's lease.
 
 ## Adding a state machine
 

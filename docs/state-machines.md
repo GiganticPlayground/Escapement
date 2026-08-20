@@ -1,7 +1,7 @@
 # Writing a state machine
 
 Everything Escapement does is a `StateMachine` plugged into one engine. Adding a
-capability touches four files and never the engine.
+capability touches six files and never the engine.
 
 ## The contract
 
