@@ -11,8 +11,8 @@ auth via `token-weaver`, the engine (group commit, conditional-write log,
 snapshot/replay, lease-based leader election, follower tailing and forwarding),
 and two state machines (`pool`, `quota`).
 
-- `npm test` — 62 unit tests, green.
-- `npm run test:failover` — 27 black-box checks across two live processes, green.
+- `npm test` — 73 unit tests, green.
+- `npm run test:failover` — 26 black-box checks across two live processes, green.
   Covers election, follower forwarding, follower read convergence, quota
   enforcement across nodes and the shape of its refusal, per-subject quota
   scoping, the idle request mix, SIGKILL promotion inside the lease TTL, graceful
