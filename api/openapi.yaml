@@ -366,7 +366,10 @@ components:
       bearerFormat: JWT
       description: >-
         Verified by `token-weaver`. Escapement never issues tokens. Strategies
-        (`jwks`, `hs256`, `static`) come from the deployment config file.
+        (`jwks`, `hs256`, `static`) come from the deployment config file. A
+        `static` token carries no claims, so it reaches the admin routes with
+        `admin: true` and the rest only when the config declares it a service
+        caller and names the app and actor it acts as.
 
   parameters:
     PoolName:
@@ -487,7 +490,9 @@ components:
           maxLength: 256
           description: >-
             Who the claim is for. Defaults to the token's subject, which is the
-            right answer for player-facing calls.
+            right answer for player-facing calls. A service credential claiming
+            on someone's behalf should pass it: its own subject is the service,
+            not the player.
         metadata:
           type: object
           maxProperties: 32

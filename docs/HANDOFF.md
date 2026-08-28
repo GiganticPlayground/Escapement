@@ -176,6 +176,19 @@ audience, verification checks only signature and issuer, so tokens the same
 issuer minted for a different service are accepted here too; each JWT strategy
 that omits one logs a startup warning.
 
+**A static token can be a service caller, not only an admin.** It used to be
+admin-only, on the reasoning that a token with no claims cannot name a player.
+The reasoning was about identity, not about admin: a trusted backend calling on
+players' behalf is a legitimate caller that simply has no `sub` to offer. It now
+declares one instead — `service: { app, actor }` — which is what the admin-only
+rule was really protecting, since an identity-less caller lands in the shared
+`-:anonymous` idempotency namespace where one caller's key can answer another's
+request. `service` and `admin` are independent flags, both gates stayed in the
+middleware rather than moving into a `paths` block a deployment could rewrite,
+and configuring two static strategies is now refused outright: a static payload
+carries nothing to tell them apart, so the second would have silently inherited
+the first one's privileges.
+
 **Request surfaces are tightened.** Bodies reject unknown fields
 (`additionalProperties: false`), `ClaimRequest.metadata` is bounded (32
 properties, flat string values ≤ 1024 chars — it lives in memory and in every

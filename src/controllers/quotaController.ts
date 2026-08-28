@@ -57,8 +57,9 @@ export const consumeQuota = async (req: Request, res: Response): Promise<void> =
  * A per-subject quota needs a subject to answer about: the ceiling applies to one
  * subject, so there is no whole-quota usage figure to report. `?subject=` names
  * one explicitly; otherwise it falls back to the caller's own identity, matching
- * how `consume` picks a subject. A credential that carries no identity (a static
- * service token) has to pass one.
+ * how `consume` picks a subject. A credential that carries no identity (an admin
+ * static token) has to pass one; a service credential names itself, so one asking
+ * about a player passes `?subject=` rather than reading its own usage.
  *
  * @route GET /v1/escapement/quotas/{quota}
  */

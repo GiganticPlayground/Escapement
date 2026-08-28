@@ -243,7 +243,7 @@ export interface components {
             remaining: number;
         };
         ClaimRequest: {
-            /** @description Who the claim is for. Defaults to the token's subject, which is the right answer for player-facing calls. */
+            /** @description Who the claim is for. Defaults to the token's subject, which is the right answer for player-facing calls. A service credential claiming on someone's behalf should pass it: its own subject is the service, not the player. */
             by?: string;
             /** @description Opaque data stored with the claim. Bounded on purpose: every claim's metadata lives in engine state and in every snapshot for as long as the claim does, so an unbounded object here is unbounded memory and snapshot growth. Flat string values only. */
             metadata?: {

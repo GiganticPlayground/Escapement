@@ -23,7 +23,12 @@ export function idempotencyKey(req: Request): string {
   return key;
 }
 
-/** Who a claim is for: an explicit value if given, else the token's subject. */
+/**
+ * Who a claim is for: an explicit value if given, else the caller's own identity —
+ * a JWT's subject, or the actor a static service strategy is configured to act as.
+ * A service credential claiming on a player's behalf should therefore pass `by`;
+ * without it the claim is attributed to the service, which is what actually acted.
+ */
 export function actorOf(req: Request, explicit?: unknown): string {
   if (typeof explicit === 'string' && explicit.length > 0) return explicit;
   return req.auth?.userId ?? 'anonymous';
@@ -45,8 +50,15 @@ export function requireAdmin(req: Request): void {
  * with the same caller retrying the same kind of operation, which is the one
  * collision idempotency exists to serve. A follower forwards the raw header and
  * the leader re-derives the same scope from the forwarded credential.
+ *
+ * A static service credential resolves to the one identity its config names, so
+ * everything holding that token shares a namespace — narrower than the global one,
+ * but not per-player. Such a caller makes its keys unique itself — a key naming
+ * the player and the operation it is for, not just a request id — which is the
+ * same discipline any client needs anyway: a key is only as good as the operation
+ * it names.
  */
-function scopedKey(req: Request, machine: string, clientKey: string): string {
+export function scopedKey(req: Request, machine: string, clientKey: string): string {
   const app = req.auth?.app ?? '-';
   const user = req.auth?.userId ?? 'anonymous';
   return `${app}:${user}:${machine}:${clientKey}`;
