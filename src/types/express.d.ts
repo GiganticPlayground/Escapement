@@ -23,6 +23,12 @@ export interface AuthStrategyContext {
   admin: boolean;
   /** Issuer of the verified token — absent for a static token. */
   issuer?: string;
+  /**
+   * Whether this credential is a configured service caller: a static token the
+   * deployment gave a fixed identity, so it can use the normal routes without
+   * naming a player of its own. Only ever set for `static`.
+   */
+  service?: boolean;
 }
 
 declare global {

@@ -53,8 +53,15 @@ auth:
 
   # ---------------------------------------------------------------------------
   # A shared secret for a service that cannot mint JWTs. A static token carries
-  # no claims, so it cannot name a player and is only accepted on the admin
-  # routes — `admin: true` is required, not optional.
+  # no claims, so nothing in the request names its holder, and a strategy has to
+  # say which of the two usable shapes it is — at least one of:
+  #
+  #   admin: true   the /v1/escapement/admin/... routes, where the target comes
+  #                 from the URL. Seeding and releasing pool codes, defining
+  #                 quotas, the engine status endpoint. Grant it deliberately.
+  #
+  #   service:      the normal routes, under an identity named HERE rather than
+  #                 by the token. See the next entry.
   #
   # Inline whitelist/blacklist patterns are fixed by this file and are the only
   # way to scope a static token. Note that an inline list REPLACES the matching
@@ -73,3 +80,34 @@ auth:
   #   paths:
   #     whitelist:
   #       - /v1/escapement/admin/*
+
+  # ---------------------------------------------------------------------------
+  # A trusted server-side caller — a backend claiming codes on behalf of players
+  # it has already authenticated itself. It is not a player and has no `sub` to
+  # offer, so `service` supplies the identity the token cannot: `app` and `actor`
+  # are used exactly where a JWT strategy would use its app claim and `sub`.
+  #
+  # That identity is the point. Without it every holder of the token would share
+  # the `-:anonymous` idempotency namespace with every other anonymous caller;
+  # with it they get their own (`{app}:{actor}:{machine}:{key}`). It is still ONE
+  # namespace for everything holding this token, so such a caller must make its
+  # own keys unique — include the player and the reason for the call, not just a
+  # request id. Claims are attributed to `actor` unless the request body passes
+  # `by`, so pass `by` when the claim is for a player.
+  #
+  # `service` grants nothing on the admin routes. A caller that needs both says
+  # `admin: true` as well, and gets each on purpose.
+  #
+  # Only one `static` strategy may be configured: a static token carries nothing
+  # to tell two of them apart, so a second would silently inherit the first one's
+  # privileges. Scope this one with `paths` instead.
+  # ---------------------------------------------------------------------------
+  # - type: static
+  #   token: ${file:/run/secrets/escapement-service-token}
+  #   service:
+  #     app: platform
+  #     actor: platform-service
+  #   paths:
+  #     whitelist:
+  #       - GET /v1/escapement/pools/*
+  #       - POST /v1/escapement/pools/*/claims

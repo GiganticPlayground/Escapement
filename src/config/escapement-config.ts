@@ -96,9 +96,39 @@ const rawHs256AuthSchema = z.object({
   ...commonAuthFields,
 });
 
+/**
+ * Characters a configured service identity may use.
+ *
+ * `app` and `actor` become segments of the stored idempotency key
+ * (`{app}:{userId}:{machine}:{clientKey}`, built in `src/services/dispatch.ts`),
+ * so a `:` in either would let one caller's scope be spelled by another — the
+ * exact collision the scoping exists to prevent. Same reasoning as `keyPathVar()`
+ * in `env.validation.ts`: a value that becomes part of a key is validated for the
+ * key, not just for being a non-empty string.
+ */
+const IDENTITY_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * The identity a `static` strategy acts under.
+ *
+ * A static token carries no claims, so nothing in the request can name the caller.
+ * Declaring the identity here gives one anyway: a fixed `app`/`actor` pair that is
+ * a property of the deployment rather than of the token. Its presence is what
+ * lets a static strategy off the admin routes — see `compileStrategy`.
+ */
+const rawServiceSchema = z.object({
+  // The `{app}` key segment a JWT strategy takes from its app claim.
+  app: z.string().min(1),
+  // Who the calls are attributed to: the subject a JWT strategy takes from `sub`.
+  actor: z.string().min(1),
+});
+
 const rawStaticAuthSchema = z.object({
   type: z.literal('static'),
   token: z.string().min(1),
+  // Present: this token is a trusted server-side caller and may use the normal
+  // routes under the identity it declares. Absent: admin routes only.
+  service: rawServiceSchema.optional(),
   ...commonAuthFields,
 });
 
@@ -145,6 +175,14 @@ export interface AuthEnv {
   ESCAPEMENT_CONFIG_PATH?: string | undefined;
 }
 
+/** The fixed identity a `static` service strategy acts under. */
+export interface ServiceIdentity {
+  /** The `{app}` namespace segment, the way a JWT strategy's app claim supplies one. */
+  app: string;
+  /** The subject calls are attributed to, the way a JWT's `sub` supplies one. */
+  actor: string;
+}
+
 export interface CompiledAuthStrategy {
   type: RawAuth['type'];
   /** Human-readable label for logs and config errors. */
@@ -157,6 +195,13 @@ export interface CompiledAuthStrategy {
   appClaim?: string;
   /** Whether this strategy may reach the admin routes. */
   admin: boolean;
+  /**
+   * Identity a `static` strategy acts under — absent for every other type, and
+   * for a static strategy that is admin-only. Present means the deployment has
+   * declared this token a trusted service caller, which is what allows it off
+   * the admin routes.
+   */
+  service?: ServiceIdentity;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +280,22 @@ function resolvePlaceholders(value: string, context: string): string {
 // Compiler
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve an identity segment and check the resolved value, not the written one —
+ * a `${env:…}` placeholder is nothing but forbidden characters until it is
+ * interpolated, and it is the interpolated value that lands in the key.
+ */
+function resolveIdentitySegment(value: string, context: string): string {
+  const resolved = resolvePlaceholders(value, context);
+  if (!IDENTITY_SEGMENT.test(resolved)) {
+    throw new Error(
+      `${context} must be letters, digits, '.', '_' or '-' — it becomes a segment of the ` +
+        `stored idempotency key, and a ':' there would let one caller spell another's scope`,
+    );
+  }
+  return resolved;
+}
+
 /** Build a clean AuthPaths, omitting absent keys (exactOptionalPropertyTypes is on). */
 function compilePaths(raw: RawPaths | undefined): AuthPaths | undefined {
   if (!raw) return undefined;
@@ -252,20 +313,38 @@ function compileStrategy(raw: RawAuth, ctx: string, defaultAppClaim: string): Co
   const paths = compilePaths(raw.paths);
 
   if (raw.type === 'static') {
-    // A static token carries no claims, so there is no `sub` to resolve a player
-    // from. It can only serve the admin routes, where the target comes from the
-    // URL — anything else would authenticate a caller we cannot name.
-    if (!raw.admin) {
+    // A static token carries no claims, so nothing in the request names its holder.
+    // Two ways to be usable anyway, and a strategy must pick at least one:
+    //
+    //   admin: true   — the admin routes, where the target comes from the URL.
+    //   service: {…}  — the normal routes, under an identity the *config* names
+    //                   rather than the token. That identity is what keeps the
+    //                   caller nameable: it scopes the idempotency keys and
+    //                   attributes the claims, instead of collapsing every holder
+    //                   of the token into the shared `-:anonymous` namespace.
+    //
+    // The two are independent — a service caller reaches the admin routes only if
+    // it is also `admin: true`.
+    if (!raw.admin && !raw.service) {
       throw new Error(
-        `${ctx}: a "static" strategy cannot identify a player (no claims), so it can only serve ` +
-          `the ${ADMIN_ROUTE_PREFIX} routes — set "admin: true" or use a JWT strategy`,
+        `${ctx}: a "static" strategy carries no claims, so it cannot identify a player by ` +
+          `itself — set "admin: true" for the ${ADMIN_ROUTE_PREFIX} routes, add a "service" ` +
+          `block naming the app and actor it acts as, or use a JWT strategy`,
       );
     }
 
+    const service = raw.service
+      ? {
+          app: resolveIdentitySegment(raw.service.app, `${ctx}.service.app`),
+          actor: resolveIdentitySegment(raw.service.actor, `${ctx}.service.actor`),
+        }
+      : undefined;
+
     return {
       type: 'static',
-      label: `${ctx} (static)`,
-      admin: true,
+      label: `${ctx} (static${service ? `, service ${service.actor}` : ''})`,
+      admin: raw.admin,
+      ...(service ? { service } : {}),
       options: {
         mode: 'static',
         staticToken: resolvePlaceholders(raw.token, `${ctx}.token`),
@@ -317,6 +396,20 @@ function compileStrategies(
   const compiled = list.map((entry, i) =>
     compileStrategy(entry, list.length > 1 ? `auth[${i}]` : 'auth', defaultAppClaim),
   );
+
+  // A static payload carries no `iss` — nothing at all — so the middleware can only
+  // trace it back to *the* static strategy. With two, every static token would be
+  // attributed to the first one listed, handing the caller whichever of the two has
+  // the wider privilege. Now that a static strategy can be admin, a service caller,
+  // or both, that misattribution would be a privilege escalation rather than a
+  // curiosity, so it is refused at startup.
+  if (compiled.filter((strategy) => strategy.type === 'static').length > 1) {
+    throw new Error(
+      `More than one "static" strategy — a static token carries no claims, so a verified one ` +
+        `cannot be traced back to the strategy that accepted it and would take the privileges ` +
+        `of whichever is listed first. Configure a single static strategy.`,
+    );
+  }
 
   // A verified payload is routed back to its strategy by `iss` (see the middleware),
   // so two strategies sharing an issuer would make the app claim ambiguous.

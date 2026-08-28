@@ -384,6 +384,18 @@ request that needs a missing value. Full list in `.env.example`.
 | `ESCAPEMENT_CONFIG_PATH` | — | auth strategy file |
 | `REQCAST_CONFIG` | — | analytics; off when absent |
 
+Auth strategies — one per kind of caller — live in that file. Players present a
+JWT and are identified by its `sub`; a server-side service that cannot mint one
+presents a `static` shared secret instead. A static token carries no claims, so
+it says which of two shapes it is: `admin: true` for the admin routes (the target
+comes from the URL), or a `service: { app, actor }` block for the normal ones,
+which supplies the identity the token cannot — used exactly where a JWT strategy
+uses its app claim and `sub`, so the caller's idempotency keys stay scoped to it
+rather than collapsing into the shared anonymous namespace. The two are
+independent, and at most one static strategy may be configured. See
+[`config/escapement.yaml.example`](config/escapement.yaml.example) and
+[docs/ARCHITECTURE.md §9](docs/ARCHITECTURE.md#9-authentication-and-authorization).
+
 The `JWT_*` group is the no-config-file fallback: when a config file supplies
 the auth strategies (`ESCAPEMENT_CONFIG_PATH`, or `config/escapement.yaml` when
 it exists), `JWT_ISSUER`/`JWKS_URI`/`JWT_SECRET` are not required.

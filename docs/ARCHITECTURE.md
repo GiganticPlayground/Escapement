@@ -552,8 +552,11 @@ they describe that subject, otherwise the whole quota.
 
 For a per-subject quota, `?subject=` names whose usage to report; omit it and the
 caller's own identity is used, matching how `consume` picks a subject. The `400`
-covers a credential that names no subject — a static service token — which gets a
-refusal rather than a figure comparing a total against a per-subject ceiling. In a
+covers a credential that names no subject — an admin static token — which gets a
+refusal rather than a figure comparing a total against a per-subject ceiling. A
+static *service* token does name one (its configured `actor`), so it reports the
+service's own usage; a service asking about a player has to pass `?subject=`, the
+same as when it consumes on that player's behalf. In a
 deployment where such tokens are not granted the player routes at all, that case
 is already answered with a `403` before it reaches the handler; the check stays as
 a backstop. `subjects` is the count of distinct subjects with recorded usage.
@@ -591,6 +594,32 @@ Admin routes live under `/v1/escapement/admin` and **deny by default** — a
 strategy must be marked `admin: true` to reach them. The privilege is re-checked
 next to the code that acts on it, via `requireAdmin(req)`, rather than trusted
 from the routing layer alone.
+
+A `static` strategy is a shared secret with no claims at all, so nothing in the
+request names its holder. It is usable in two shapes, and a strategy must declare
+at least one of them or the config fails to compile:
+
+- `admin: true` — the admin routes, where the target comes from the URL.
+- `service: { app, actor }` — the normal routes, under an identity supplied by
+  the **config** rather than by the token. `app` and `actor` are used exactly
+  where a JWT strategy uses its app claim and `sub`: they scope the caller's
+  idempotency keys and attribute its claims.
+
+The identity is what makes the second shape safe. A caller with no identity falls
+into the `-:anonymous` idempotency namespace shared by every other anonymous
+caller, where one caller's key can answer another's request; a configured service
+gets `{app}:{actor}:…` instead. That is still one namespace for everything holding
+the token, so a service credential must make its own keys unique — a key naming the
+player and the operation, not just a request id — and should pass `by` when a claim is for a player,
+since its own subject is the service. The two flags are independent: `service` grants
+nothing on the admin routes, and `admin` names no identity.
+
+Only one `static` strategy may be configured. A verified static payload carries
+nothing to trace it back with, so a second would be attributed to whichever is
+listed first and would inherit that strategy's privileges. Both gates live in the
+middleware rather than in a strategy's `paths` block, because an inline path list
+replaces the token's own whitelist/blacklist claims and neither restriction should
+be weakenable by a deployment writing its own patterns.
 
 Auth runs before the OpenAPI validator, so nothing reaches S3 before it passes.
 

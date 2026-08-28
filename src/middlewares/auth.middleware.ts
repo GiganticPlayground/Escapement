@@ -50,7 +50,10 @@ const byIssuer = new Map<string, CompiledAuthStrategy>(
     .map((strategy) => [strategy.issuer, strategy]),
 );
 
-/** First `static` strategy, if any — a static payload carries nothing to match on. */
+/**
+ * The `static` strategy, if any — a static payload carries nothing to match on, so
+ * the compiler allows at most one and this is unambiguous.
+ */
 const staticStrategy = strategies.find((strategy) => strategy.type === 'static');
 
 /**
@@ -74,19 +77,18 @@ function requestPath(req: Request): string {
 }
 
 /**
- * Map the JWT identity onto `req.auth`.
+ * Read the identity out of a JWT payload.
  *
  * On the player routes this is mandatory — the S3 key is built from it, so a
  * token that cannot name a player is rejected. On the admin routes the target
  * comes from the URL instead, so an identity is recorded when the token happens
  * to carry one and its absence is not an error.
  */
-function attachIdentity(
+function jwtIdentity(
   payload: JWTPayload,
-  req: Request,
   strategy: CompiledAuthStrategy,
   optional: boolean,
-): void {
+): AuthContext | undefined {
   const appClaimName = strategy.appClaim;
   const userId = payload.sub;
   const app = appClaimName ? payload[appClaimName] : undefined;
@@ -95,19 +97,86 @@ function attachIdentity(
   const hasApp = typeof app === 'string' && app.length > 0;
 
   if (hasUserId && hasApp) {
-    const auth: AuthContext = { userId, app };
-    req.auth = auth;
-    return;
+    return { userId, app };
   }
 
   if (optional) {
-    return;
+    return undefined;
   }
 
   if (!hasUserId) {
     throw new HttpError(401, 'Token is missing the subject (sub) claim');
   }
   throw new HttpError(401, `Token is missing the '${appClaimName ?? 'app'}' claim`);
+}
+
+/** What a verified request is allowed to be, once the strategy that won is known. */
+export interface ResolvedAuth {
+  /** Caller identity — absent when nothing names one (an admin token without a `sub`). */
+  auth?: AuthContext;
+  /** Which strategy accepted, recorded for the admin re-check and for logs. */
+  strategy: AuthStrategyContext;
+}
+
+/**
+ * Decide what a verified payload means for this path: which routes it may use,
+ * and who it acts as. Pure, so it can be exercised without a booted deployment.
+ *
+ * Two gates live here rather than in the strategy's `paths` block, because an
+ * inline path list would override the token's own whitelist/blacklist claims and
+ * both restrictions are properties of the service, not something a deployment
+ * should be able to weaken by writing its own patterns:
+ *
+ * - the admin routes require `admin: true`;
+ * - a static token reaches anything else only if the config declared it a service
+ *   caller and thereby gave it an identity.
+ */
+export function resolveAuthContext(
+  payload: JWTPayload,
+  path: string,
+  strategy: CompiledAuthStrategy,
+): ResolvedAuth {
+  const isAdminRoute = path.startsWith(ADMIN_ROUTE_PREFIX);
+
+  if (isAdminRoute && !strategy.admin) {
+    throw new HttpError(403, 'This credential is not allowed on the admin routes');
+  }
+
+  if (strategy.type === 'static') {
+    // The compiler already refuses a static strategy that is neither admin nor a
+    // service caller; this is the belt to that suspenders. A static token has no
+    // `sub`, so without a configured identity it could only act on a player it
+    // cannot name.
+    const service = strategy.service;
+    if (!isAdminRoute && !service) {
+      throw new HttpError(
+        403,
+        'A static token cannot access player-scoped routes — it carries no player identity',
+      );
+    }
+
+    return {
+      // The configured identity, when there is one, is used on the admin routes
+      // too: it is what scopes this caller's idempotency keys, and an admin
+      // request is as entitled to its own namespace as any other.
+      ...(service ? { auth: { userId: service.actor, app: service.app } } : {}),
+      strategy: {
+        type: 'static',
+        admin: strategy.admin,
+        ...(service ? { service: true } : {}),
+      },
+    };
+  }
+
+  const auth = jwtIdentity(payload, strategy, isAdminRoute);
+  return {
+    ...(auth ? { auth } : {}),
+    strategy: {
+      type: strategy.type,
+      admin: strategy.admin,
+      ...(strategy.issuer ? { issuer: strategy.issuer } : {}),
+    },
+  };
 }
 
 export const authMiddleware = createAuthMiddleware({
@@ -120,44 +189,17 @@ export const authMiddleware = createAuthMiddleware({
       throw new HttpError(401, 'Verified token could not be matched to an auth strategy');
     }
 
-    const isAdminRoute = requestPath(req).startsWith(ADMIN_ROUTE_PREFIX);
-
-    // The admin gate lives here rather than in the strategy's `paths` block: an
-    // inline path list would override the token's own whitelist/blacklist claims,
-    // and this restriction is a property of the service, not something a
-    // deployment should be able to weaken by writing its own patterns.
-    if (isAdminRoute && !strategy.admin) {
-      throw new HttpError(403, 'This credential is not allowed on the admin routes');
-    }
-
-    if (strategy.type === 'static') {
-      // Guaranteed by the compiler (a static strategy must be admin), so this is
-      // the belt to that suspenders: a static token has no `sub` and could only
-      // ever act on a player it cannot name.
-      if (!isAdminRoute) {
-        throw new HttpError(
-          403,
-          'A static token cannot access player-scoped routes — it carries no player identity',
-        );
-      }
-      const context: AuthStrategyContext = { type: 'static', admin: true };
-      req.authStrategy = context;
-      return;
-    }
-
-    attachIdentity(payload, req, strategy, isAdminRoute);
-
-    const context: AuthStrategyContext = {
-      type: strategy.type,
-      admin: strategy.admin,
-      ...(strategy.issuer ? { issuer: strategy.issuer } : {}),
-    };
-    req.authStrategy = context;
+    const resolved = resolveAuthContext(payload, requestPath(req), strategy);
+    if (resolved.auth) req.auth = resolved.auth;
+    req.authStrategy = resolved.strategy;
   },
 });
 
 logger.info(
   `auth: ${strategies.length} ${strategies.length === 1 ? 'strategy' : 'strategies'} (${strategies
-    .map((strategy) => `${strategy.type}${strategy.admin ? ':admin' : ''}`)
+    .map(
+      (strategy) =>
+        `${strategy.type}${strategy.admin ? ':admin' : ''}${strategy.service ? ':service' : ''}`,
+    )
     .join(', ')})`,
 );
