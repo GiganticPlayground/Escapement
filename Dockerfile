@@ -10,7 +10,7 @@
 # production dependency is ever added, this shortcut stops being valid and the
 # installs have to move back into the target-arch stage.
 
-FROM --platform=$BUILDPLATFORM node:24.22.1-slim AS builder
+FROM --platform=$BUILDPLATFORM node:24-slim AS builder
 WORKDIR /app
 
 # logra, token-weaver and reqcast are Git dependencies. npm fetches each as a
@@ -26,7 +26,7 @@ RUN npm run build
 # Reinstall with dev dependencies omitted to get the runtime node_modules.
 RUN rm -rf node_modules && npm ci --omit=dev && npm cache clean --force
 
-FROM node:24.22.1-slim AS runtime
+FROM node:24-slim AS runtime
 RUN apt-get update && apt-get install -y \
   ca-certificates \
   curl \

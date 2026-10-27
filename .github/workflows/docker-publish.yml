@@ -89,6 +89,9 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # Always re-resolve the floating node:24-slim base so releases pick up
+          # patched Node builds instead of a stale locally/cached base image.
+          pull: true
           tags: ${{ steps.image.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ steps.image.outputs.source }}
